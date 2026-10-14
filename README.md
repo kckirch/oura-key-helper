@@ -2,7 +2,7 @@
 
 A small, open-source Mac companion for recovering an **existing** Oura ring key from the official iPhone app's local backup. No jailbreak, ring reset, or cloud account access is required by the extraction process.
 
-**Prototype:** twenty-three fixture tests pass, and the reader has also recovered a known working key from a privately captured official Oura database. However, this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Existing encrypted backups are detected and refused. For a new backup, an explicit password sheet can temporarily disable computer backup encryption, then restore and verify it using the same password. This flow has fixture coverage but has not been tested on a real phone. An Apple Silicon Mac build is supplied locally. It is not notarized.
+**Prototype:** twenty-five fixture tests pass, and the reader has also recovered a known working key from a privately captured official Oura database. However, this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Existing encrypted backups are detected and refused. For a new backup, an explicit password sheet can temporarily disable computer backup encryption, then restore and verify it using the same password. This flow has fixture coverage but has not been tested on a real phone. An Apple Silicon Mac build is supplied locally. It is not notarized.
 
 ## Use
 
@@ -64,3 +64,5 @@ The backup-creation dependency is separate, user-installed software. No Homebrew
 - [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice) supplies cross-platform backup tools without jailbreaking.
 
 These are protocol/schema references, not a guarantee that every current iOS/Oura version is compatible. This is an independent interoperability tool, not an official Oura product.
+
+Backup failure reporting drains tool output in memory, keeping only a numeric device error code (or the process exit status). Unrelated paths and error descriptions are discarded, not logged or displayed.

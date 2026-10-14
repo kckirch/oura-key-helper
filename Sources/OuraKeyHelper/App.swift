@@ -149,23 +149,30 @@ import KeyReader
             environment["BACKUP_PASSWORD"] = password
             process.environment = environment
         }
-        // Backup output may contain unrelated filenames. Discard it instead of logging or showing it.
-        let pipe = capture ? Pipe() : nil
-        process.standardOutput = pipe?.fileHandleForWriting ?? FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        // Preserve only numeric failure codes from backup output, never filenames or descriptions.
+        let pipe = Pipe()
+        process.standardOutput = pipe.fileHandleForWriting
+        process.standardError = capture ? FileHandle.nullDevice : pipe.fileHandleForWriting
         self.process = process
         try process.run()
         if let timeout {
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if process.isRunning { process.terminate() } }
         }
-        pipe?.fileHandleForWriting.closeFile()
+        pipe.fileHandleForWriting.closeFile()
         let marker = folder?.appendingPathComponent(".backup-active-pid")
         if let marker { try? Data(String(process.processIdentifier).utf8).write(to: marker) }
         defer { if let marker { try? FileManager.default.removeItem(at: marker) } }
         let output = try await Task.detached { () -> String in
-            let data = pipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+            var data = Data()
+            var diagnostic = BackupDiagnostic()
+            while true {
+                let chunk = pipe.fileHandleForReading.readData(ofLength: 8192)
+                if chunk.isEmpty { break }
+                if capture { data.append(chunk) } else { diagnostic.consume(chunk) }
+            }
+            diagnostic.finish()
             process.waitUntilExit()
-            guard process.terminationStatus == 0 else { throw ReaderError.message("The device backup did not complete. Check the cable, free disk space, and the iPhone’s trust/passcode prompt, then retry. Check the helper’s encryption recovery status.") }
+            guard process.terminationStatus == 0 else { throw ReaderError.message(diagnostic.failure(exitStatus: process.terminationStatus)) }
             return String(data: data, encoding: .utf8) ?? ""
         }.value
         self.process = nil
