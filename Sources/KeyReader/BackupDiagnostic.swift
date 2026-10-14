@@ -1,12 +1,22 @@
 import Foundation
 
+public struct BackupActivity: Decodable, Equatable {
+    public let files: Int
+    public let bytes: Int64
+    public let indexReady: Bool
+}
+
 /// Drain tool output without retaining unrelated filenames or device data.
 public struct BackupDiagnostic {
     private var line = Data()
     private var dropping = false
     public private(set) var errorCode: Int?
     public private(set) var progress: Int?
+    public private(set) var progressUpdates = 0
+    public private(set) var activity: BackupActivity?
+    public private(set) var activityUpdates = 0
     private var reportedFailure: (stage: String, kind: String, code: Int?)?
+    private var payloadDetail = ""
     public init() {}
     public mutating func consume(_ data: Data) {
         for byte in data {
@@ -22,6 +32,12 @@ public struct BackupDiagnostic {
     public mutating func finish() { if !dropping { inspectLine() }; line.removeAll() }
     private mutating func inspectLine() {
         guard let text = String(data: line, encoding: .utf8) else { return }
+        if text.hasPrefix("OURA_ACTIVITY "),
+           let value = try? JSONDecoder().decode(BackupActivity.self, from: Data(text.dropFirst(14).utf8)),
+           (0...1_000_000_000).contains(value.files), (0...(1 << 60)).contains(value.bytes),
+           value.files >= (activity?.files ?? 0), value.bytes >= (activity?.bytes ?? 0) {
+            activity = value; activityUpdates += 1; return
+        }
         if text.hasPrefix("OURA_FAILURE "),
            let data = String(text.dropFirst(13)).data(using: .utf8),
            let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -29,10 +45,16 @@ public struct BackupDiagnostic {
            ["connect", "prepare", "transfer", "decrypt", "index", "payload", "unknown"].contains(stage),
            ["FileNotFoundError", "PermissionError", "OSError", "ValueError", "DatabaseError", "OperationalError", "BackupPasswordIsRequired", "InvalidPassword", "CorruptedEntryError", "MissingEntryError", "NotEnoughDiskSpaceError", "ConnectionTerminatedError", "ConnectionResetError", "ConnectionAbortedError", "TimeoutError", "PyMobileDevice3Exception", "OuraPayloadMissing", "OuraDatabaseMissing", "StorageLimitError", "UnknownError"].contains(kind) {
             reportedFailure = (stage, kind, value["deviceCode"] as? Int)
+            payloadDetail = ""
+            if kind == "OuraPayloadMissing", let payload = value["payload"] as? String,
+               ["database", "journal", "shared-memory"].contains(payload),
+               let state = value["state"] as? String, ["absent", "size-mismatch"].contains(state) {
+                payloadDetail = "; \(payload)/\(state)"
+            }
             return
         }
         if text.hasPrefix("OURA_PROGRESS "), let value = Int(text.dropFirst(14)), (0...100).contains(value) {
-            progress = value; return
+            progress = value; progressUpdates += 1; return
         }
         guard text.hasPrefix("ErrorCode "),
               let colon = text.firstIndex(of: ":"), let code = Int(text[text.index(text.startIndex, offsetBy: 10)..<colon]), code != 0 else { return }
@@ -56,7 +78,7 @@ public struct BackupDiagnostic {
                 }
             }
             let code = failure.code.map { "; device code \($0)" } ?? ""
-            return message + " [\(failure.stage)/\(failure.kind)\(code)]"
+            return message + " [\(failure.stage)/\(failure.kind)\(payloadDetail)\(code)]"
         }
         if errorCode == 902 { return "Recovery failed in the older collector, which did not report its cause. Update the helper before retrying." }
         if errorCode == 901 { return "Recovery cancelled." }

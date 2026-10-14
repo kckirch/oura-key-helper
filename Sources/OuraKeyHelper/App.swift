@@ -11,6 +11,8 @@ import KeyReader
     @Published var transferProgress: Int?
     @Published var recoveryStarted: Date?
     @Published var lastTransferUpdate: Date?
+    @Published var transferActivity: BackupActivity?
+    @Published var lastActivity: Date?
     @Published var transferring = false
     @Published var keys: [RingKey] = []
     @Published var selected = ""
@@ -106,7 +108,7 @@ import KeyReader
         }
         guard canPrepareBackup else { status = connection.guidance; return }
         busy = true; backingUp = true; keys = []; saved = ""; reveal = false; copied = false; cancelled = false
-        transferProgress = nil; lastTransferUpdate = nil; recoveryStarted = Date(); transferring = false
+        transferProgress = nil; lastTransferUpdate = nil; transferActivity = nil; lastActivity = nil; recoveryStarted = Date(); transferring = false
         status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
         Task {
             var temporary: URL?
@@ -125,7 +127,7 @@ import KeyReader
                 }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
-                status = "Reading from your device. Keep it connected and approve its backup prompt. Only selected files are saved; the first transfer can take time."
+                status = "Connecting for recovery…"
                 transferring = true
                 _ = try await run(backupTool, filteredPrefix + [devices[0], folder.path], capture: false, folder: folder, password: temporaryPassword)
                 guard !cancelled else { throw ReaderError.message("Cancelled.") }
@@ -176,16 +178,22 @@ import KeyReader
             var data = Data()
             var diagnostic = BackupDiagnostic()
             while true {
-                let chunk = pipe.fileHandleForReading.readData(ofLength: 8192)
+                let chunk = pipe.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
                 if capture { data.append(chunk) } else {
+                    let previousProgress = diagnostic.progressUpdates
+                    let previousActivity = diagnostic.activityUpdates
                     diagnostic.consume(chunk)
-                    if let percent = diagnostic.progress, folder != nil {
+                    if folder != nil, diagnostic.progressUpdates != previousProgress || diagnostic.activityUpdates != previousActivity {
+                        let percent = diagnostic.progress
+                        let activity = diagnostic.activity
+                        let hasProgress = diagnostic.progressUpdates != previousProgress
+                        let hasActivity = diagnostic.activityUpdates != previousActivity
                         await MainActor.run {
-                            self.lastTransferUpdate = Date()
                             if !self.cancelled {
-                                self.transferProgress = percent
-                                self.status = "Reading from your device. Only selected files are saved."
+                                if hasProgress { self.lastTransferUpdate = Date(); self.transferProgress = percent }
+                                if hasActivity { self.lastActivity = Date(); self.transferActivity = activity }
+                                self.status = "Reading device data…"
                             }
                         }
                     }
@@ -307,19 +315,35 @@ struct ContentView: View {
                                 ProgressView().progressViewStyle(.linear).accessibilityLabel("Recovery in progress")
                             }
                             TimelineView(.periodic(from: .now, by: 1)) { context in
-                                HStack {
-                                    if helper.transferring {
-                                        if let updated = helper.lastTransferUpdate, context.date.timeIntervalSince(updated) >= 20 {
-                                            Text("Waiting for the next device progress update…")
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        if let activity = helper.transferActivity {
+                                            Text("\(activity.files.formatted()) files processed · \(ByteCountFormatter.string(fromByteCount: activity.bytes, countStyle: .file)) received")
+                                                .monospacedDigit()
                                         } else if let percent = helper.transferProgress {
                                             Text("\(percent)% transferred").monospacedDigit()
+                                        }
+                                        Spacer()
+                                        Text("Elapsed")
+                                        Text(started, style: .timer).monospacedDigit().fixedSize()
+                                    }
+                                    if helper.transferring {
+                                        if let updated = helper.lastActivity {
+                                            let age = max(0, Int(context.date.timeIntervalSince(updated)))
+                                            if age >= 20 {
+                                                Text("No new data for \(age) seconds. Check your device for a prompt.")
+                                            } else {
+                                                let freshness = age < 3 ? "Data is arriving." : "Last data received \(age) seconds ago."
+                                                if helper.transferActivity?.indexReady == true {
+                                                    Text("\(freshness) Checking Oura’s files for your key.")
+                                                } else {
+                                                    Text("\(freshness) Waiting for the backup index to identify Oura’s files.")
+                                                }
+                                            }
                                         } else {
-                                            Text("Waiting for device progress…")
+                                            Text("Waiting for your device. Approve its backup prompt if shown.")
                                         }
                                     }
-                                    Spacer()
-                                    Text("Elapsed")
-                                    Text(started, style: .timer).monospacedDigit().fixedSize()
                                 }.font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -346,7 +370,7 @@ struct ContentView: View {
                         }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                if !helper.backups.isEmpty {
+                if !helper.backups.isEmpty && !helper.backingUp {
                     GroupBox("Temporary data needs attention") {
                         VStack(alignment: .leading, spacing: 16) {
                             ForEach(helper.backups, id: \.path) { folder in

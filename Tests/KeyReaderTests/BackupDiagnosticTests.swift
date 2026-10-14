@@ -2,6 +2,27 @@ import XCTest
 import KeyReader
 
 final class BackupDiagnosticTests: XCTestCase {
+    func testActivityIsIncrementalBoundedAndDoesNotTreatOtherOutputAsActivity() {
+        var diagnostic = BackupDiagnostic()
+        diagnostic.consume(Data("OURA_ACTIV".utf8))
+        XCTAssertNil(diagnostic.activity)
+        diagnostic.consume(Data("ITY {\"files\":19532,\"bytes\":123456789,\"indexReady\":false,\"path\":\"private\"}\n".utf8))
+        XCTAssertEqual(diagnostic.activity?.files, 19532)
+        XCTAssertEqual(diagnostic.activity?.bytes, 123456789)
+        XCTAssertEqual(diagnostic.activityUpdates, 1)
+        diagnostic.consume(Data("private unrelated output\nOURA_ACTIVITY {\"files\":-1,\"bytes\":0,\"indexReady\":false}\nOURA_ACTIVITY {\"files\":true,\"bytes\":0,\"indexReady\":false}\nOURA_ACTIVITY {\"files\":1,\"bytes\":10,\"indexReady\":false}\n".utf8))
+        XCTAssertEqual(diagnostic.activityUpdates, 1)
+        diagnostic.consume(Data("OURA_ACTIVITY {\"files\":19533,\"bytes\":123456790,\"indexReady\":true}\n".utf8))
+        XCTAssertEqual(diagnostic.activityUpdates, 2)
+        XCTAssertEqual(diagnostic.activity?.indexReady, true)
+        XCTAssertFalse(diagnostic.failure(exitStatus: 1).contains("private"))
+    }
+    func testPayloadDetailsOnlyUseRecognizedCategories() {
+        var diagnostic = BackupDiagnostic()
+        diagnostic.consume(Data("OURA_FAILURE {\"stage\":\"payload\",\"kind\":\"OuraPayloadMissing\",\"payload\":\"journal\",\"state\":\"absent\",\"message\":\"private\"}\n".utf8))
+        XCTAssertTrue(diagnostic.failure(exitStatus: 1).contains("journal/absent"))
+        XCTAssertFalse(diagnostic.failure(exitStatus: 1).contains("private"))
+    }
     func testStructuredFailureIdentifiesStageWithoutEchoingPrivateFields() {
         var diagnostic = BackupDiagnostic()
         diagnostic.consume(Data("OURA_FAILURE {\"stage\":\"payload\",\"kind\":\"OuraPayloadMissing\",\"deviceCode\":104,\"message\":\"secret-key/private/file\"}\n".utf8))
