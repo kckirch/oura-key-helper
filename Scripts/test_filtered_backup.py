@@ -271,6 +271,63 @@ class EarlyRecoveryTests(unittest.TestCase):
                 db.execute('INSERT INTO ringconfiguration VALUES (?, ?)', ('fixture-ring', 'not-a-key'))
             self.assertFalse(filtered.reader_has_key(reader))
 
+class DirectRecoveryTests(unittest.TestCase):
+    def test_attribution_requires_exact_domain_and_path_hash(self):
+        import hashlib
+        relative = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/assa.sqlite'
+        identifier = hashlib.sha1((filtered.DOMAIN + '-' + relative).encode()).hexdigest()
+        self.assertEqual(filtered.attributed_relative_path('device/Snapshot/aa/' + identifier, '/.b/6/' + relative), relative)
+        other = hashlib.sha1(('AppDomain-other-' + relative).encode()).hexdigest()
+        self.assertIsNone(filtered.attributed_relative_path(other, '/.b/6/' + relative))
+        self.assertIsNone(filtered.attributed_relative_path(identifier, '/.b/6/../' + relative))
+        self.assertIsNone(filtered.attributed_relative_path(identifier, '/.b/6/' + relative.lower()))
+
+    def test_direct_recovery_waits_for_committed_journal_and_reads_its_updated_key(self):
+        import hashlib, sqlite3
+        for enabled, damage in [(True, None), (False, None), (True, 'truncate'), (True, 'checksum'), (True, 'salt')]:
+            with self.subTest(enabled=enabled, damage=damage), tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp); root = folder/'device'; root.mkdir(); (folder/'.scratch').mkdir()
+                fixture = sqlite3.connect(folder/'fixture.sqlite')
+                fixture.execute('PRAGMA journal_mode=WAL')
+                fixture.execute('CREATE TABLE ringconfiguration (id TEXT, auth_key BLOB)')
+                fixture.execute('INSERT INTO ringconfiguration VALUES (?, ?)', ('fixture-ring', b'old-key-12345678'))
+                fixture.commit(); fixture.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                fixture.execute('UPDATE ringconfiguration SET auth_key = ?', (b'new-key-12345678',))
+                fixture.commit()
+                database = (folder/'fixture.sqlite').read_bytes()
+                wal = (folder/'fixture.sqlite-wal').read_bytes()
+                fixture.close()
+                self.assertTrue(filtered.complete_wal(database, wal))
+                if damage == 'truncate': wal = wal[:-1]
+                if damage == 'checksum': wal = wal[:-1] + bytes([wal[-1] ^ 1])
+                if damage == 'salt': wal = wal[:40] + bytes([wal[40] ^ 1]) + wal[41:]
+                if damage: self.assertFalse(filtered.complete_wal(database, wal))
+                self.assertFalse(filtered.complete_wal(database, b''))
+                candidates = filtered.CandidateBuffers()
+                direct = filtered.DirectRecovery(root, candidates, filtered.StorageBudget(folder), enabled)
+                def deliver(name, content):
+                    relative = 'ACCOUNT/' + name
+                    path = root/hashlib.sha1((filtered.DOMAIN + '-' + relative).encode()).hexdigest()
+                    path.touch(); candidates.remember(path, content)
+                    direct.received_file(path, '/.b/6/' + relative)
+                deliver('assa.sqlite', database)
+                self.assertFalse((folder/'Reader').exists())
+                if enabled and not damage:
+                    with self.assertRaises(filtered.EarlyKeyReady): deliver('assa.sqlite-wal', wal)
+                    self.assertTrue(filtered.reader_has_key(folder/'Reader'))
+                    # The base database held an older valid key; verify the latest journal was applied.
+                    import shutil
+                    check = folder/'check'; check.mkdir()
+                    for suffix in ['', '-wal']:
+                        identifier = hashlib.sha1((filtered.DOMAIN + '-ACCOUNT/assa.sqlite' + suffix).encode()).hexdigest()
+                        shutil.copyfile(folder/'Reader'/identifier, check/('assa.sqlite' + suffix))
+                    with sqlite3.connect(check/'assa.sqlite') as db:
+                        self.assertEqual(db.execute('SELECT auth_key FROM ringconfiguration').fetchone()[0], b'new-key-12345678')
+                else:
+                    deliver('assa.sqlite-wal', wal)
+                    self.assertFalse((folder/'Reader').exists())
+                candidates.clear()
+
 class ActivityTests(unittest.TestCase):
     def test_discarded_bytes_report_real_activity_without_retaining_contents(self):
         import io

@@ -14,6 +14,7 @@ from pathlib import Path
 import plistlib
 import re
 import sqlite3
+import struct
 import sys
 import tempfile
 import time
@@ -302,6 +303,93 @@ class EarlyRecovery:
         raise EarlyKeyReady()
 
 
+def attributed_relative_path(file_name, device_name):
+    """Match the backup's domain/path hash, not an app-like filename alone."""
+    identifier = Path(file_name).name
+    if not re.fullmatch(r'[0-9a-f]{40}', identifier): return None
+    if not isinstance(device_name, str) or len(device_name) > 4096: return None
+    parts = device_name.split('/')
+    if len(parts) > 64 or '..' in parts or parts[-1] not in NAMES: return None
+    for start in range(len(parts)):
+        relative = '/'.join(parts[start:])
+        if relative and not relative.startswith('/') and hashlib.sha1((DOMAIN + '-' + relative).encode()).hexdigest() == identifier:
+            return relative
+    return None
+
+
+def complete_wal(database, wal):
+    """Conservative fast path: every frame is valid and the last frame commits."""
+    if len(database) < 100 or database[:16] != b'SQLite format 3\0' or database[18:20] != b'\2\2': return False
+    page_size = int.from_bytes(database[16:18], 'big')
+    if page_size == 1: page_size = 65536
+    if page_size < 512 or page_size > 65536 or page_size & (page_size - 1) or len(database) % page_size: return False
+    if len(wal) < 32 + 24 + page_size or (len(wal) - 32) % (24 + page_size): return False
+    magic, version, wal_page_size = struct.unpack('>III', wal[:12])
+    if magic not in (0x377f0682, 0x377f0683) or version != 3007000 or wal_page_size != page_size: return False
+    endian = '<' if magic == 0x377f0682 else '>'
+    checksum = (0, 0)
+    def add(content):
+        nonlocal checksum
+        s0, s1 = checksum
+        for x0, x1 in struct.iter_unpack(endian + 'II', content):
+            s0 = (s0 + x0 + s1) & 0xffffffff
+            s1 = (s1 + x1 + s0) & 0xffffffff
+        checksum = s0, s1
+    add(wal[:24])
+    if checksum != struct.unpack('>II', wal[24:32]): return False
+    committed = False
+    for offset in range(32, len(wal), 24 + page_size):
+        frame = wal[offset:offset + 24 + page_size]
+        if frame[8:16] != wal[16:24] or int.from_bytes(frame[:4], 'big') == 0: return False
+        add(frame[:8]); add(frame[24:])
+        if checksum != struct.unpack('>II', frame[16:24]): return False
+        committed = int.from_bytes(frame[4:8], 'big') > 0
+    return committed
+
+
+class DirectRecovery:
+    def __init__(self, root, candidates, budget, enabled=False):
+        self.root, self.candidates, self.budget, self.enabled = root, candidates, budget, enabled
+        self.payloads = {}
+        self.started = time.monotonic()
+
+    def received_file(self, path, device_name):
+        relative = attributed_relative_path(str(path), device_name)
+        if relative is None or not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(self.root.resolve()): return
+        content = self.candidates.files.get(path.stat().st_ino)
+        if content is None:
+            if path.stat().st_size > self.candidates.limit: return
+            content = path.read_bytes()
+        # Count-only diagnostics: no identifiers, paths, keys, or record contents.
+        print('OURA_TIMING ' + json.dumps({'event': 'oura-' + {'assa.sqlite': 'database', 'assa.sqlite-wal': 'journal', 'assa.sqlite-shm': 'shared-memory'}[Path(relative).name], 'seconds': round(time.monotonic() - self.started, 1)}), flush=True)
+        if not self.enabled: return
+        if sum(len(data) for name, data in self.payloads.items() if name != relative) + len(content) > self.candidates.limit: return
+        self.payloads[relative] = content
+        base = relative.removesuffix('-wal').removesuffix('-shm')
+        database, wal = self.payloads.get(base), self.payloads.get(base + '-wal')
+        # No journal (or an empty/partial one) cannot prove a current snapshot before the index.
+        if database is None or wal is None or not complete_wal(database, wal): return
+        try:
+            with tempfile.TemporaryDirectory(dir=self.root.parent / '.scratch') as temp:
+                reader = Path(temp) / 'Reader'
+                reader.mkdir()
+                with sqlite3.connect(reader / 'Manifest.db') as index:
+                    index.execute('CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT)')
+                    for name, data in [(base, database), (base + '-wal', wal)]:
+                        identifier = hashlib.sha1((DOMAIN + '-' + name).encode()).hexdigest()
+                        self.budget.account(len(data))
+                        (reader / identifier).write_bytes(data)
+                        index.execute('INSERT INTO Files VALUES (?, ?, ?)', (identifier, DOMAIN, name))
+                (reader / 'Manifest.plist').write_bytes(plistlib.dumps({'IsEncrypted': False}))
+                # SQLite rebuilds its transient shared-memory index from the verified journal.
+                if not reader_has_key(reader): return
+                reader.rename(self.root.parent / 'Reader')
+        except (OSError, sqlite3.Error, ValueError):
+            return
+        print('OURA_TIMING ' + json.dumps({'event': 'direct-recovery', 'seconds': round(time.monotonic() - self.started, 1)}), flush=True)
+        raise EarlyKeyReady()
+
+
 def filtered_service_type():
     from pymobiledevice3.services.mobilebackup2 import Mobilebackup2Service
     from pymobiledevice3.services.device_link import DeviceLink, CODE_SUCCESS
@@ -367,8 +455,10 @@ def filtered_service_type():
             dl.backup_path = backup_directory / self.lockdown.udid
             dl.password = password
             dl.early = EarlyRecovery(dl.backup_path, password, dl.candidates, dl.budget)
+            dl.direct = DirectRecovery(dl.backup_path, dl.candidates, dl.budget, getattr(self, 'direct_enabled', False))
             def received(file_name, device_name):
                 path = resolve_device_path(backup_directory, file_name)
+                dl.direct.received_file(path, device_name)
                 dl.early.received_file(path, allow_empty=(path == dl.kept_path))
                 dl.activity.index_ready = dl.early.manifest_signature is not None
             dl.post_file_receive = received
@@ -407,6 +497,8 @@ async def collect(device, folder, password, phase):
                 print('OURA_PROGRESS ' + str(int(value)), flush=True)
         phase['stage'] = 'transfer'
         async with filtered_service_type()(lockdown) as service:
+            encryption = await lockdown.get_value(domain='com.apple.mobile.backup')
+            service.direct_enabled = isinstance(encryption, dict) and encryption.get('WillEncrypt', False) is False
             try:
                 await service.backup(full=True, backup_directory=folder, filter_callback=selection, progress_callback=progress, password=password)
             except EarlyKeyReady:
