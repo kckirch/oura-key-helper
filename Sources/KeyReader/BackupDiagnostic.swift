@@ -5,6 +5,7 @@ public struct BackupDiagnostic {
     private var line = Data()
     private var dropping = false
     public private(set) var errorCode: Int?
+    public private(set) var progress: Int?
     public init() {}
     public mutating func consume(_ data: Data) {
         for byte in data {
@@ -19,7 +20,11 @@ public struct BackupDiagnostic {
     }
     public mutating func finish() { if !dropping { inspectLine() }; line.removeAll() }
     private mutating func inspectLine() {
-        guard let text = String(data: line, encoding: .utf8), text.hasPrefix("ErrorCode "),
+        guard let text = String(data: line, encoding: .utf8) else { return }
+        if text.hasPrefix("OURA_PROGRESS "), let value = Int(text.dropFirst(14)), (0...100).contains(value) {
+            progress = value; return
+        }
+        guard text.hasPrefix("ErrorCode "),
               let colon = text.firstIndex(of: ":"), let code = Int(text[text.index(text.startIndex, offsetBy: 10)..<colon]), code != 0 else { return }
         errorCode = code
     }

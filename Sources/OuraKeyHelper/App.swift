@@ -15,12 +15,19 @@ import KeyReader
     @Published var backups: [URL] = []
     @Published var deleting: URL?
     @Published var showDelete = false
-    @Published var showBackupConsent = false
+    @Published var copied = false
     @Published var showPassword = false
     @Published var password = ""
     @Published var restorePending = false
     @Published var restoring = false
     let encryption: BackupEncryption
+    var filteredRuntime: URL? {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("USB/oura-usb"), FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
+        let path = store.root.deletingLastPathComponent().appendingPathComponent("USB Runtime/bin/python3")
+        return FileManager.default.isExecutableFile(atPath: path.path) ? path : nil
+    }
+    var filteredPrefix: [String] { filteredRuntime?.lastPathComponent == "oura-usb" ? [] : [filteredScript?.path ?? ""] }
+    var filteredScript: URL? { Bundle.main.resourceURL?.appendingPathComponent("Source/Scripts/filtered_backup.py") }
     var canPrepareBackup: Bool {
         if restorePending { return false }
         if case .encrypted = connection { return true }
@@ -34,7 +41,9 @@ import KeyReader
         encryption = BackupEncryption(journal: support.appendingPathComponent("Oura Key Helper/encryption-recovery"))
         restorePending = encryption.pendingDevice != nil
         store = ManagedBackups(root: support.appendingPathComponent("Oura Key Helper/Temporary Backups"))
+        for folder in store.list() { try? store.delete(folder) }
         backups = store.list()
+        if !backups.isEmpty { status = "Some temporary data couldn’t be removed. Review it below." }
     }
     var chosen: RingKey? { keys.first { $0.id + $0.hex == selected } }
     func executable(_ name: String) -> URL? {
@@ -42,10 +51,8 @@ import KeyReader
     }
     func refreshConnection() async {
         guard !busy else { return }
-        guard let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller"), executable("idevicebackup2") != nil else {
-            connection = .missingTools; return
-        }
-        connection = await USBConnection.check(using: deviceTool, info: infoTool, installer: installer)
+        guard let tool = filteredRuntime else { connection = .missingTools; return }
+        connection = await USBConnection.checkFiltered(using: tool, prefix: filteredPrefix)
     }
     func existing() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -53,14 +60,18 @@ import KeyReader
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MobileSync/Backup")
         if panel.runModal() == .OK, let folder = panel.url { extract(folder) }
     }
-    func extract(_ folder: URL) {
-        busy = true; keys = []; saved = ""; reveal = false; status = "Reading Oura’s ring key…"
+    func extract(_ folder: URL, cleanup ownedFolder: URL? = nil) {
+        busy = true; keys = []; saved = ""; reveal = false; copied = false; status = "Reading Oura’s ring key…"
         Task {
             do {
                 let result = try await Task.detached { try KeyReader.read(folder) }.value
                 keys = result; selected = result[0].id + result[0].hex
                 status = "Found \(result.count == 1 ? "one ring key" : "\(result.count) ring keys")."
             } catch { status = error.localizedDescription }
+            if let ownedFolder {
+                do { try store.delete(ownedFolder); status += " Temporary data removed." }
+                catch { status += " Cleanup needs attention. Remove the temporary data below." }
+            }
             busy = false; backups = store.list()
         }
     }
@@ -85,55 +96,46 @@ import KeyReader
     }
     func createBackup(temporaryPassword: String? = nil) {
         guard !busy else { return }
-        guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller") else {
-            status = "Backup creation needs libimobiledevice. Install it with Homebrew: brew install libimobiledevice ideviceinstaller. You can still read an existing backup."
+        guard let backupTool = filteredRuntime else {
+            status = "Bundled USB support is missing. Reinstall the helper. Existing backups still work."
             return
         }
         guard canPrepareBackup else { status = connection.guidance; return }
-        busy = true; backingUp = true; keys = []; saved = ""; reveal = false; cancelled = false
+        busy = true; backingUp = true; keys = []; saved = ""; reveal = false; copied = false; cancelled = false
         status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
         Task {
             var temporary: URL?
-            var encryptionAttempted = false
             do {
-                let listing = try await run(deviceTool, ["-l"], capture: true)
+                let listing = try await run(backupTool, filteredPrefix + ["--devices"], capture: true)
                 let devices = listing.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
                 guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB iPhone was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the iPhone with official Oura connected, then try again.") }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
-                let readiness = await USBConnection.check(using: deviceTool, info: infoTool, installer: installer)
-                if case .encrypted = readiness, let secret = temporaryPassword {
-                    guard !cancelled else { throw ReaderError.message("Cancelled before changing encryption.") }
-                    encryptionAttempted = true
-                    status = "Temporarily turning off backup encryption. Approve the prompt on your phone."
-                    try await encryption.disable(device: devices[0], password: secret, command: encryptionCommand)
+                let readiness = await USBConnection.checkFiltered(using: backupTool, prefix: filteredPrefix)
+                if case .encrypted = readiness {
+                    guard let secret = temporaryPassword, !secret.isEmpty else {
+                        connection = readiness; throw ReaderError.message("Enter the existing backup password to decrypt Oura’s retained files.")
+                    }
                 } else if !readiness.canBackUp {
                     connection = readiness; throw ReaderError.message(readiness.guidance)
                 }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
-                status = "Creating a temporary phone backup…"
-                _ = try await run(backupTool, ["-u", devices[0], "backup", "--full", folder.path], capture: false, folder: folder)
-                guard !cancelled else { throw ReaderError.message("Backup cancelled. The partial backup is listed below; you can delete it now.") }
+                status = "Reading from your device. Keep it connected and approve its backup prompt. Only selected files are saved; the first transfer can take time."
+                _ = try await run(backupTool, filteredPrefix + [devices[0], folder.path], capture: false, folder: folder, password: temporaryPassword)
+                guard !cancelled else { throw ReaderError.message("Cancelled.") }
                 status = "Backup complete. Reading Oura’s ring key table…"
-                let backup = folder.appendingPathComponent(devices[0])
+                let backup = folder.appendingPathComponent("Reader")
                 let result = try await Task.detached { try KeyReader.read(backup) }.value
                 keys = result; selected = result[0].id + result[0].hex
-                status = "Ring key found. Save it before deleting the backup."
+                status = "Ring key recovered."
             } catch {
-                status = (cancelled ? "Backup cancelled." : error.localizedDescription) + (temporary != nil ? " Your temporary backup remains listed below; you can delete it now." : "")
+                status = cancelled ? "Cancelled." : error.localizedDescription
             }
-            if encryptionAttempted {
-                restoring = true
-                let outcome = status
-                status = "Restoring backup encryption. Keep your phone connected and approve its prompt."
+            if let folder = temporary {
                 do {
-                    try await encryption.restore(password: temporaryPassword ?? "", command: encryptionCommand)
-                    status = outcome + " Backup encryption is enabled again."
-                } catch {
-                    status = outcome + " Encryption restoration needs attention. Reconnect the original phone and choose Restore encryption."
-                }
-                restorePending = encryption.pendingDevice != nil
-                restoring = false
+                    try store.delete(folder)
+                    status += keys.isEmpty ? " Temporary data removed." : " Temporary data removed. Save or copy the key before closing."
+                } catch { status += " Cleanup needs attention. Remove the temporary data below." }
             }
             busy = false; backingUp = false; process = nil; backups = store.list()
             await refreshConnection()
@@ -162,13 +164,22 @@ import KeyReader
         let marker = folder?.appendingPathComponent(".backup-active-pid")
         if let marker { try? Data(String(process.processIdentifier).utf8).write(to: marker) }
         defer { if let marker { try? FileManager.default.removeItem(at: marker) } }
-        let output = try await Task.detached { () -> String in
+        let output = try await Task.detached { () async throws -> String in
             var data = Data()
             var diagnostic = BackupDiagnostic()
+            var previousProgress: Int?
             while true {
                 let chunk = pipe.fileHandleForReading.readData(ofLength: 8192)
                 if chunk.isEmpty { break }
-                if capture { data.append(chunk) } else { diagnostic.consume(chunk) }
+                if capture { data.append(chunk) } else {
+                    diagnostic.consume(chunk)
+                    if let percent = diagnostic.progress, percent != previousProgress {
+                        previousProgress = percent
+                        await MainActor.run {
+                            if !self.cancelled { self.status = "Reading device backup: \(percent)%. Only selected files are saved." }
+                        }
+                    }
+                }
             }
             diagnostic.finish()
             process.waitUntilExit()
@@ -178,24 +189,24 @@ import KeyReader
         self.process = nil
         return output
     }
-    func cancel() { guard !restoring else { return }; cancelled = true; if process?.isRunning == true { process?.interrupt() }; status = "Stopping the backup. Its partial files will remain available to delete when the process stops." }
+    func cancel() { guard !restoring else { return }; cancelled = true; if process?.isRunning == true { process?.interrupt() }; status = "Stopping and removing temporary data…" }
     func save() {
         guard let key = chosen else { return }
         let panel = NSSavePanel(); panel.message = "This file contains the ring’s existing authentication key. Keep it private."
         panel.nameFieldStringValue = "oura-ring-\(key.id.filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(48)).key"
         if panel.runModal() == .OK, let destination = panel.url {
-            do { try KeyReader.save(key, to: destination); saved = destination.path; status = "Key saved. It is independent of the backup, which you can now delete." }
+            do { try KeyReader.save(key, to: destination); saved = destination.path; status = "Key saved. You can close the helper." }
             catch { status = "Could not save the key: " + error.localizedDescription }
         }
     }
-    func copy() { if let key = chosen { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key.hex, forType: .string); status = "Key copied only because you requested it. Paste it into Open Oura’s ring-key field." } }
+    func copy() { if let key = chosen { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key.hex, forType: .string); copied = true; status = "Key copied only because you requested it. Paste it into Open Oura’s ring-key field." } }
     func readManaged(_ folder: URL) {
         guard store.isOwned(folder) else { status = "This is not a helper-created backup."; return }
         let candidates = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil))?.filter {
             FileManager.default.fileExists(atPath: $0.appendingPathComponent("Manifest.db").path)
         } ?? []
         guard candidates.count == 1 else { status = "This temporary backup is incomplete or contains no readable backup index. You can delete it or create a new one."; return }
-        extract(candidates[0])
+        extract(candidates[0], cleanup: folder)
     }
     func viewSource() {
         if let url = Bundle.main.resourceURL?.appendingPathComponent("Source") { NSWorkspace.shared.open(url) }
@@ -215,6 +226,12 @@ import KeyReader
             let alert = NSAlert(); alert.messageText = "Finish the operation before quitting"
             alert.informativeText = "Keep your phone connected while encryption is being restored. During backup creation, you can choose Cancel and wait for restoration to finish."
             alert.addButton(withTitle: "Return to helper"); alert.runModal(); return .terminateCancel
+        }
+        if let helper = Self.helper, !helper.keys.isEmpty, helper.saved.isEmpty, !helper.copied {
+            let alert = NSAlert(); alert.messageText = "Save or copy your key before closing"
+            alert.informativeText = "Temporary data has been removed. The recovered key is only in memory."
+            alert.addButton(withTitle: "Return to key"); alert.addButton(withTitle: "Discard key and quit")
+            if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
         }
         return .terminateNow
     }
@@ -256,13 +273,14 @@ struct ContentView: View {
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("I own this ring or have the owner’s permission.", isOn: $helper.consent)
-                    HStack(spacing: 12) {
-                        Button("Read existing backup…") { helper.existing() }
-                        Button("Create temporary backup…") {
-                            if case .encrypted = helper.connection { helper.showPassword = true }
-                            else { helper.showBackupConsent = true }
-                        }.buttonStyle(.borderedProminent).disabled(!helper.canPrepareBackup)
-                    }.disabled(!helper.consent || helper.busy)
+                    Text("Saves only Oura’s key database and backup metadata, then removes temporary data automatically.").font(.callout).foregroundStyle(.secondary)
+                    Button("Recover ring key") {
+                        if case .encrypted = helper.connection { helper.showPassword = true }
+                        else { helper.createBackup() }
+                    }.buttonStyle(.borderedProminent).disabled(!helper.canPrepareBackup || !helper.consent || helper.busy)
+                    DisclosureGroup("Use an existing backup") {
+                        Button("Choose backup…") { helper.existing() }.disabled(!helper.consent || helper.busy)
+                    }
                 }
                 if helper.busy || !helper.status.isEmpty {
                     HStack(alignment: .top, spacing: 12) {
@@ -293,7 +311,7 @@ struct ContentView: View {
                     }
                 }
                 if !helper.backups.isEmpty {
-                    GroupBox("Temporary backups") {
+                    GroupBox("Temporary data needs attention") {
                         VStack(alignment: .leading, spacing: 16) {
                             ForEach(helper.backups, id: \.path) { folder in
                                 VStack(alignment: .leading, spacing: 8) {
@@ -319,8 +337,8 @@ struct ContentView: View {
                 DisclosureGroup("Privacy & data", isExpanded: $showPrivacy) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Extraction reads the backup index and Oura’s ring-key database. Connection checks read the device name, backup encryption flag, and official Oura’s install status.")
-                        Text("Creating a phone backup can copy other app data. It stays on this Mac until you delete it. Existing Finder backups are never deleted.")
-                        Text("No telemetry or uploads. Keys are revealed, copied, or saved only when you choose. Deletion is not a guaranteed forensic secure erase.")
+                        Text("The first transfer can send other backup bytes; they are discarded without saving their contents. Backup metadata can describe other apps. Temporary data is removed after success, cancellation, or failure, and on reopening. Existing Finder backups are never deleted. This is not a full device backup.")
+                        Text("No telemetry or uploads. Keys stay in memory until you explicitly copy or save them. Your device’s encryption setting stays unchanged. Deletion is not a guaranteed forensic secure erase.")
                     }.font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                 }
                 HStack {
@@ -338,18 +356,18 @@ struct ContentView: View {
         }
         .sheet(isPresented: $helper.showPassword, onDismiss: { helper.password = "" }) {
             VStack(alignment: .leading, spacing: 16) {
-                Text(helper.restorePending ? "Restore backup encryption" : "Use a temporary unencrypted backup").font(.title2.weight(.semibold))
+                Text(helper.restorePending ? "Restore backup encryption" : "Unlock your encrypted backup").font(.title2.weight(.semibold))
                 Text(helper.restorePending
                      ? "Reconnect the original phone and enter its original backup password."
-                     : "The helper will turn off computer backup encryption, create a local phone backup, then turn encryption back on with the same password.")
+                     : "Enter your existing computer-backup password to decrypt Oura’s selected files locally. Your device’s encryption setting stays on.")
                 SecureField("Current backup password", text: $helper.password)
                 if !helper.restorePending {
-                    Text("The backup may include other phone data and stays until you delete it. Keep the phone connected; if restoration is interrupted, return here to finish it.").font(.callout).foregroundStyle(.secondary)
+                    Text("The password is not saved. Temporary backup data is removed when the operation ends.").font(.callout).foregroundStyle(.secondary)
                 }
                 HStack {
                     Spacer()
                     Button("Cancel", role: .cancel) { helper.showPassword = false; helper.password = "" }
-                    Button(helper.restorePending ? "Restore encryption" : "Turn off & create backup") {
+                    Button(helper.restorePending ? "Restore encryption" : "Recover ring key") {
                         if helper.restorePending { helper.restoreEncryption() }
                         else {
                             let secret = helper.password; helper.password = ""; helper.showPassword = false
@@ -358,12 +376,6 @@ struct ContentView: View {
                     }.buttonStyle(.borderedProminent).disabled(helper.password.isEmpty)
                 }
             }.padding(24).frame(width: 470)
-        }
-        .alert("Create a temporary phone backup?", isPresented: $helper.showBackupConsent) {
-            Button("Cancel", role: .cancel) {}
-            Button("Create backup") { helper.createBackup() }
-        } message: {
-            Text("This can copy other phone data, not just Oura. It stays at \(helper.store.root.path) until you delete it. Your existing backups and encryption settings are unchanged.")
         }
         .alert("Delete this temporary backup?", isPresented: $helper.showDelete) {
             Button("Cancel", role: .cancel) { helper.deleting = nil }

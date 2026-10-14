@@ -6,3 +6,8 @@ dist/
 *.sqlite-shm
 .DS_Store
 *.log
+
+__pycache__/
+*.pyc
+build-usb/
+build-usb-source/

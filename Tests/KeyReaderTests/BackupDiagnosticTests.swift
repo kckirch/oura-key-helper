@@ -12,6 +12,13 @@ final class BackupDiagnosticTests: XCTestCase {
         XCTAssertTrue(message.contains("104"))
         XCTAssertFalse(message.contains("sensitive")); XCTAssertFalse(message.contains("private"))
     }
+    func testProgressAcceptsOnlyBoundedIntegers() {
+        var diagnostic = BackupDiagnostic()
+        diagnostic.consume(Data("OURA_PROGRESS 42\n".utf8))
+        XCTAssertEqual(diagnostic.progress, 42)
+        diagnostic.consume(Data("OURA_PROGRESS 101\nOURA_PROGRESS -1\nOURA_PROGRESS private-data\n".utf8))
+        XCTAssertEqual(diagnostic.progress, 42)
+    }
     func testOversizedOrMalformedLinesCannotBecomeFailureCodes() {
         var diagnostic = BackupDiagnostic()
         diagnostic.consume(Data((String(repeating: "x", count: 9000) + "ErrorCode 5: ignored\nErrorCode oops: ignored\nErrorCode 0: successful\n").utf8))

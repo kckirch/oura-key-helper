@@ -102,6 +102,15 @@ final class USBConnectionTests: XCTestCase {
         XCTAssertNil(USBConnection.backupEncryption(in: ""))
         XCTAssertNil(USBConnection.backupEncryption(in: try plist([String]())))
     }
+    func testBundledProbeStatesAndInvalidResponses() {
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"connected\",\"name\":\"Test iPad\"}".utf8)), .connected("Test iPad"))
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"encrypted\"}".utf8)), .encrypted(""))
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"missingOura\"}".utf8)), .missingOura(""))
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"multiple\",\"count\":2}".utf8)), .multiple(2))
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"multiple\",\"count\":1}".utf8)), .unavailable)
+        XCTAssertEqual(USBConnection.filteredProbe(Data("{\"state\":\"unexpected\"}".utf8)), .unavailable)
+        XCTAssertEqual(USBConnection.filteredProbe(Data("not json".utf8)), .unavailable)
+    }
     func testMissingVerificationToolsCannotStartBackup() async {
         var status = await USBConnection.check(using: device, info: nil, installer: installer)
         XCTAssertEqual(status, .missingTools); XCTAssertFalse(status.canBackUp)

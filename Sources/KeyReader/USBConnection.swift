@@ -29,9 +29,9 @@ public enum USBConnection: Equatable {
     }
     public var guidance: String {
         switch self {
-        case .missingTools: return "Install USB support: brew install libimobiledevice ideviceinstaller. Existing backups still work."
+        case .missingTools: return "Bundled USB support is missing. Reinstall the helper. Existing backups still work."
         case .multiple: return "Connect only the device that syncs your ring in official Oura."
-        case .encrypted: return "Create a temporary backup using your current backup password. Encryption will be restored afterward."
+        case .encrypted: return "Enter your existing backup password when prompted. Your device’s encryption setting stays unchanged."
         case .needsTrust: return "Unlock your phone and approve Trust This Computer in Finder, then check again."
         case .missingOura: return "Install official Oura and sync your ring, then check again."
         case .ouraCheckUnavailable: return "Couldn’t verify official Oura. Unlock your phone and check again."
@@ -81,6 +81,33 @@ public enum USBConnection: Equatable {
         guard let value = domain["WillEncrypt"] else { return false }
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
+    }
+    public static func checkFiltered(using tool: URL, prefix: [String]) async -> USBConnection {
+        await Task.detached {
+            let process = Process(); process.executableURL = tool; process.arguments = prefix + ["--probe"]
+            let pipe = Pipe(); process.standardOutput = pipe.fileHandleForWriting
+            process.standardInput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+            do { try process.run(); pipe.fileHandleForWriting.closeFile() } catch { return .unavailable }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 8) { if process.isRunning { process.terminate() } }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return .unavailable }
+            return filteredProbe(data)
+        }.value
+    }
+    public static func filteredProbe(_ data: Data) -> USBConnection {
+        guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let state = value["state"] as? String else { return .unavailable }
+        let name = value["name"] as? String ?? ""
+        switch state {
+        case "none": return .none
+        case "connected": return .connected(name)
+        case "encrypted": return .encrypted(name)
+        case "needsTrust": return .needsTrust(name)
+        case "missingOura": return .missingOura(name)
+        case "ouraCheckUnavailable": return .ouraCheckUnavailable(name)
+        case "multiple": if let count = value["count"] as? Int, count > 1 { return .multiple(count) }; return .unavailable
+        default: return .unavailable
+        }
     }
     public static func ouraInstalled(in response: String) -> Bool? {
         guard let object = try? PropertyListSerialization.propertyList(from: Data(response.utf8), format: nil) else { return nil }
