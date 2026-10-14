@@ -1,16 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-if pgrep -x OuraKeyHelper >/dev/null; then
-  printf '%s\n' 'Quit Oura Key Helper before rebuilding. Never replace a running app executable.' >&2
-  exit 1
-fi
+app_dir="${OURA_HELPER_OUTPUT_DIR:-$PWD/dist}/Oura Key Helper.app"
+while read -r pid; do
+  [[ -z "$pid" ]] && continue
+  running_command="$(ps -p "$pid" -o command=)"
+  if [[ "$running_command" == "$app_dir/Contents/MacOS/OuraKeyHelper" ]]; then
+    printf '%s\n' 'Quit the target app before rebuilding. Never replace a running app executable.' >&2
+    exit 1
+  fi
+done < <(pgrep -x OuraKeyHelper || true)
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
 swift build -c release
 binary_dir=$(swift build -c release --show-bin-path)
-app_dir="$PWD/dist/Oura Key Helper.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/Source"
 cp "$binary_dir/OuraKeyHelper" "$app_dir/Contents/MacOS/OuraKeyHelper"
 strip -S "$app_dir/Contents/MacOS/OuraKeyHelper"
@@ -25,8 +29,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.kck.openoura.key-helper</string>
 <key>CFBundleExecutable</key><string>OuraKeyHelper</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>9</string>
+<key>CFBundleShortVersionString</key><string>0.2.1</string>
+<key>CFBundleVersion</key><string>10</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
@@ -39,5 +43,5 @@ mkdir -p "$app_dir/Contents/Resources/USB"
 /usr/bin/rsync -a --delete build-usb/oura-usb/ "$app_dir/Contents/Resources/USB/"
 cp build-usb-source/GPL-dependency-sources.tar.gz "$app_dir/Contents/Resources/Source/"
 codesign --force --deep --sign - "$app_dir"
-ditto -c -k --keepParent "$app_dir" "$PWD/dist/Oura-Key-Helper-macOS.zip"
+ditto -c -k --keepParent "$app_dir" "$(dirname "$app_dir")/Oura-Key-Helper-macOS.zip"
 printf '%s\n' "$app_dir"

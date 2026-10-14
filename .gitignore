@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 build-usb/
 build-usb-source/
+dist-progress/

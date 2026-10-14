@@ -8,6 +8,10 @@ import KeyReader
     @Published var busy = false
     @Published var backingUp = false
     @Published var status = ""
+    @Published var transferProgress: Int?
+    @Published var recoveryStarted: Date?
+    @Published var lastTransferUpdate: Date?
+    @Published var transferring = false
     @Published var keys: [RingKey] = []
     @Published var selected = ""
     @Published var reveal = false
@@ -102,6 +106,7 @@ import KeyReader
         }
         guard canPrepareBackup else { status = connection.guidance; return }
         busy = true; backingUp = true; keys = []; saved = ""; reveal = false; copied = false; cancelled = false
+        transferProgress = nil; lastTransferUpdate = nil; recoveryStarted = Date(); transferring = false
         status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
         Task {
             var temporary: URL?
@@ -121,9 +126,11 @@ import KeyReader
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
                 status = "Reading from your device. Keep it connected and approve its backup prompt. Only selected files are saved; the first transfer can take time."
+                transferring = true
                 _ = try await run(backupTool, filteredPrefix + [devices[0], folder.path], capture: false, folder: folder, password: temporaryPassword)
                 guard !cancelled else { throw ReaderError.message("Cancelled.") }
-                status = "Backup complete. Reading Oura’s ring key table…"
+                transferring = false
+                status = "Reading Oura’s ring key…"
                 let backup = folder.appendingPathComponent("Reader")
                 let result = try await Task.detached { try KeyReader.read(backup) }.value
                 keys = result; selected = result[0].id + result[0].hex
@@ -131,6 +138,7 @@ import KeyReader
             } catch {
                 status = cancelled ? "Cancelled." : error.localizedDescription
             }
+            transferring = false
             if let folder = temporary {
                 do {
                     try store.delete(folder)
@@ -167,16 +175,18 @@ import KeyReader
         let output = try await Task.detached { () async throws -> String in
             var data = Data()
             var diagnostic = BackupDiagnostic()
-            var previousProgress: Int?
             while true {
                 let chunk = pipe.fileHandleForReading.readData(ofLength: 8192)
                 if chunk.isEmpty { break }
                 if capture { data.append(chunk) } else {
                     diagnostic.consume(chunk)
-                    if let percent = diagnostic.progress, percent != previousProgress {
-                        previousProgress = percent
+                    if let percent = diagnostic.progress, folder != nil {
                         await MainActor.run {
-                            if !self.cancelled { self.status = "Reading device backup: \(percent)%. Only selected files are saved." }
+                            self.lastTransferUpdate = Date()
+                            if !self.cancelled {
+                                self.transferProgress = percent
+                                self.status = "Reading from your device. Only selected files are saved."
+                            }
                         }
                     }
                 }
@@ -283,10 +293,36 @@ struct ContentView: View {
                     }
                 }
                 if helper.busy || !helper.status.isEmpty {
-                    HStack(alignment: .top, spacing: 12) {
-                        if helper.busy { ProgressView().controlSize(.small) }
-                        Text(helper.status).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        if helper.backingUp && !helper.restoring { Button("Cancel") { helper.cancel() } }
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 12) {
+                            if helper.busy && !helper.backingUp { ProgressView().controlSize(.small) }
+                            Text(helper.status).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                            if helper.backingUp && !helper.restoring { Button("Cancel") { helper.cancel() } }
+                        }
+                        if helper.backingUp, let started = helper.recoveryStarted {
+                            if helper.transferring, let percent = helper.transferProgress {
+                                ProgressView(value: Double(percent), total: 100).progressViewStyle(.linear)
+                                    .accessibilityLabel("Device transfer").accessibilityValue("\(percent) percent")
+                            } else {
+                                ProgressView().progressViewStyle(.linear).accessibilityLabel("Recovery in progress")
+                            }
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                HStack {
+                                    if helper.transferring {
+                                        if let updated = helper.lastTransferUpdate, context.date.timeIntervalSince(updated) >= 20 {
+                                            Text("Waiting for the next device progress update…")
+                                        } else if let percent = helper.transferProgress {
+                                            Text("\(percent)% transferred").monospacedDigit()
+                                        } else {
+                                            Text("Waiting for device progress…")
+                                        }
+                                    }
+                                    Spacer()
+                                    Text("Elapsed")
+                                    Text(started, style: .timer).monospacedDigit().fixedSize()
+                                }.font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
                 }
                 if helper.restorePending {

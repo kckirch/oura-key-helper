@@ -4,13 +4,15 @@ A small open-source Mac companion to recover an existing Oura ring authenticatio
 
 ## Current status
 
-**Prototype 0.2.0.** The native reader has recovered a known working key from an official Oura database. Twenty-seven Swift tests, four Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
+**Prototype 0.2.1.** The native reader has recovered a known working key from an official Oura database. Twenty-seven Swift tests, four Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
 
 ## Use
 
 1. Connect the unlocked device that already syncs your ring in official Oura. Approve Trust/backup authorization on the device when prompted.
 2. Confirm ownership or permission, then choose **Recover ring key**.
 3. If computer backups are encrypted, enter that device's existing backup password locally. It is used to decrypt selected files; **the phone's encryption setting stays unchanged**. An unknown password cannot be bypassed.
+During recovery, a native progress bar shows the reported transfer percentage and elapsed time. Before progress is available it animates; after 20 seconds without an update it explicitly says the next device update is pending. Percentage describes transfer, not completion of local key reading/cleanup.
+
 4. The helper reads the key into memory and automatically removes its temporary backup data. Choose **Save key file** or **Copy key** before closing. The helper does not save a key automatically.
 
 Existing Finder backups can also be selected under **Use an existing backup**. The helper never deletes those backups; the Swift existing-backup reader currently supports unencrypted backups only.
