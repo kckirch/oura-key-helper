@@ -30,7 +30,7 @@ public struct BackupEncryption {
             guard !password.isEmpty else { throw ReaderError.message("Enter the original backup password to restore encryption.") }
             _ = try await command(["-u", device, "encryption", "on"], password)
             guard try await encrypted(device, command: command) else {
-                throw ReaderError.message("Backup encryption could not be verified. Reconnect the phone and restore encryption.")
+                throw ReaderError.message("Backup encryption could not be verified. Reconnect the device and restore encryption.")
             }
         }
         try FileManager.default.removeItem(at: journal)
@@ -43,6 +43,6 @@ public struct BackupEncryption {
             let domain = try await command(["-u", device, "-q", "com.apple.mobile.backup", "--xml"], nil)
             if let enabled = USBConnection.backupEncryption(in: domain) { return enabled }
         }
-        throw ReaderError.message("Couldn’t verify backup encryption. Reconnect and unlock the original phone.")
+        throw ReaderError.message("Couldn’t verify backup encryption. Reconnect and unlock the original device.")
     }
 }

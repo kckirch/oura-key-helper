@@ -17,13 +17,13 @@ public enum USBConnection: Equatable {
         switch self {
         case .checking: return "Checking USB connection…"
         case .missingTools: return "Connection check unavailable"
-        case .none: return "No phone detected"
+        case .none: return "No device detected"
         case .unavailable: return "Couldn’t check the USB connection"
-        case .connected(let name): return "Connected: " + (name.isEmpty ? "iPhone" : name) + " · Oura installed"
-        case .encrypted(let name): return "Connected: " + (name.isEmpty ? "iPhone" : name) + " · encrypted backup"
-        case .needsTrust(let name): return (name.isEmpty ? "Phone detected" : "Detected: " + name) + " · unlock or approve Trust"
-        case .missingOura(let name): return "Connected: " + (name.isEmpty ? "iPhone" : name) + " · Oura not installed"
-        case .ouraCheckUnavailable(let name): return "Connected: " + (name.isEmpty ? "iPhone" : name) + " · Oura check unavailable"
+        case .connected(let name): return "Connected: " + (name.isEmpty ? "device" : name) + " · Oura installed"
+        case .encrypted(let name): return "Connected: " + (name.isEmpty ? "device" : name) + " · encrypted backup"
+        case .needsTrust(let name): return (name.isEmpty ? "Device detected" : "Detected: " + name) + " · unlock or approve Trust"
+        case .missingOura(let name): return "Connected: " + (name.isEmpty ? "device" : name) + " · Oura not installed"
+        case .ouraCheckUnavailable(let name): return "Connected: " + (name.isEmpty ? "device" : name) + " · Oura check unavailable"
         case .multiple(let count): return "\(count) USB devices detected"
         }
     }
@@ -32,11 +32,11 @@ public enum USBConnection: Equatable {
         case .missingTools: return "Bundled USB support is missing. Reinstall the helper. Existing backups still work."
         case .multiple: return "Connect only the device that syncs your ring in official Oura."
         case .encrypted: return "Enter your existing backup password when prompted. Your device’s encryption setting stays unchanged."
-        case .needsTrust: return "Unlock your phone and approve Trust This Computer in Finder, then check again."
+        case .needsTrust: return "Unlock your device and approve Trust This Computer in Finder, then check again."
         case .missingOura: return "Install official Oura and sync your ring, then check again."
-        case .ouraCheckUnavailable: return "Couldn’t verify official Oura. Unlock your phone and check again."
+        case .ouraCheckUnavailable: return "Couldn’t verify official Oura. Unlock your device and check again."
         case .connected: return "Sync your ring in official Oura before starting."
-        default: return "Connect your unlocked iPhone with a USB data cable."
+        default: return "Connect your unlocked device with a USB data cable."
         }
     }
     public static func check(using tool: URL?, info: URL?, installer: URL?) async -> USBConnection {

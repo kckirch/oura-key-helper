@@ -20,7 +20,7 @@ final class BackupDiagnosticTests: XCTestCase {
     func testPayloadDetailsOnlyUseRecognizedCategories() {
         var diagnostic = BackupDiagnostic()
         diagnostic.consume(Data("OURA_FAILURE {\"stage\":\"payload\",\"kind\":\"OuraPayloadMissing\",\"payload\":\"journal\",\"state\":\"absent\",\"message\":\"private\"}\n".utf8))
-        XCTAssertTrue(diagnostic.failure(exitStatus: 1).contains("journal/absent"))
+        XCTAssertTrue(diagnostic.details(exitStatus: 1).contains("journal/absent"))
         XCTAssertFalse(diagnostic.failure(exitStatus: 1).contains("private"))
     }
     func testStructuredFailureIdentifiesStageWithoutEchoingPrivateFields() {
@@ -28,14 +28,19 @@ final class BackupDiagnosticTests: XCTestCase {
         diagnostic.consume(Data("OURA_FAILURE {\"stage\":\"payload\",\"kind\":\"OuraPayloadMissing\",\"deviceCode\":104,\"message\":\"secret-key/private/file\"}\n".utf8))
         let message = diagnostic.failure(exitStatus: 1)
         XCTAssertTrue(message.contains("wasn’t received completely"))
-        XCTAssertTrue(message.contains("payload/OuraPayloadMissing; device code 104"))
+        XCTAssertTrue(diagnostic.details(exitStatus: 1).contains("payload/OuraPayloadMissing; device code 104"))
+        XCTAssertFalse(message.contains("OuraPayloadMissing")); XCTAssertFalse(message.contains("104"))
         XCTAssertFalse(message.contains("secret")); XCTAssertFalse(message.contains("/private/file"))
+        XCTAssertFalse(diagnostic.details(exitStatus: 1).contains("secret"))
+        let error = BackupRecoveryFailure(message: message, details: diagnostic.details(exitStatus: 1))
+        XCTAssertEqual(error.localizedDescription, message)
+        XCTAssertTrue(error.details.contains("device code 104"))
     }
     func testUnrecognizedStructuredFieldsAreNotEchoedAnd902IsNotCalledADeviceError() {
         var diagnostic = BackupDiagnostic()
         diagnostic.consume(Data("OURA_FAILURE {\"stage\":\"private-stage\",\"kind\":\"secret-key\"}\nErrorCode 902: private message\n".utf8))
         let message = diagnostic.failure(exitStatus: 1)
-        XCTAssertTrue(message.contains("older collector"))
+        XCTAssertTrue(message.contains("Update the helper"))
         XCTAssertFalse(message.contains("Device error")); XCTAssertFalse(message.contains("private")); XCTAssertFalse(message.contains("secret"))
     }
     func testSplitErrorCodeIsCapturedWithoutItsSensitiveDescription() {
@@ -45,7 +50,7 @@ final class BackupDiagnosticTests: XCTestCase {
         diagnostic.finish()
         XCTAssertEqual(diagnostic.errorCode, 104)
         let message = diagnostic.failure(exitStatus: 1)
-        XCTAssertTrue(message.contains("104"))
+        XCTAssertTrue(diagnostic.details(exitStatus: 1).contains("104"))
         XCTAssertFalse(message.contains("sensitive")); XCTAssertFalse(message.contains("private"))
     }
     func testProgressAcceptsOnlyBoundedIntegers() {
@@ -60,6 +65,6 @@ final class BackupDiagnosticTests: XCTestCase {
         diagnostic.consume(Data((String(repeating: "x", count: 9000) + "ErrorCode 5: ignored\nErrorCode oops: ignored\nErrorCode 0: successful\n").utf8))
         diagnostic.finish()
         XCTAssertNil(diagnostic.errorCode)
-        XCTAssertTrue(diagnostic.failure(exitStatus: 7).contains("exit status: 7"))
+        XCTAssertTrue(diagnostic.details(exitStatus: 7).contains("exit status: 7"))
     }
 }

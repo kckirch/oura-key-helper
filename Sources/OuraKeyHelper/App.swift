@@ -8,9 +8,10 @@ import KeyReader
     @Published var busy = false
     @Published var backingUp = false
     @Published var status = ""
+    @Published var diagnosticDetails = ""
+    @Published var cleanupComplete = false
     @Published var transferProgress: Int?
     @Published var recoveryStarted: Date?
-    @Published var lastTransferUpdate: Date?
     @Published var transferActivity: BackupActivity?
     @Published var lastActivity: Date?
     @Published var transferring = false
@@ -62,12 +63,13 @@ import KeyReader
     }
     func existing() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.message = "Choose the iPhone backup folder containing Manifest.db. This backup will never be deleted by the helper."
+        panel.message = "Choose the device backup folder containing Manifest.db. This backup will never be deleted by the helper."
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MobileSync/Backup")
         if panel.runModal() == .OK, let folder = panel.url { extract(folder) }
     }
     func extract(_ folder: URL, cleanup ownedFolder: URL? = nil) {
-        busy = true; keys = []; saved = ""; reveal = false; copied = false; status = "Reading Oura’s ring key…"
+        diagnosticDetails = ""; cleanupComplete = false
+        busy = true; keys = []; saved = ""; reveal = false; copied = false; status = "Finding your key…"
         Task {
             do {
                 let result = try await Task.detached { try KeyReader.read(folder) }.value
@@ -75,8 +77,14 @@ import KeyReader
                 status = "Found \(result.count == 1 ? "one ring key" : "\(result.count) ring keys")."
             } catch { status = error.localizedDescription }
             if let ownedFolder {
-                do { try store.delete(ownedFolder); status += " Temporary data removed." }
-                catch { status += " Cleanup needs attention. Remove the temporary data below." }
+                let outcome = status
+                status = "Removing temporary data…"
+                do {
+                    let store = self.store
+                    try await Task.detached { try store.delete(ownedFolder) }.value
+                    cleanupComplete = true
+                    status = outcome + " Temporary data removed."
+                } catch { status = outcome + " Cleanup needs attention. Remove the temporary data below." }
             }
             busy = false; backups = store.list()
         }
@@ -94,7 +102,7 @@ import KeyReader
             do {
                 try await encryption.restore(password: secret, command: encryptionCommand)
                 status = "Backup encryption is enabled again."
-            } catch { status = "Encryption restoration needs attention. Reconnect the original phone and try again." }
+            } catch { status = "Encryption restoration needs attention. Reconnect the original device and try again." }
             restorePending = encryption.pendingDevice != nil
             busy = false; backingUp = false; restoring = false
             await refreshConnection()
@@ -107,15 +115,16 @@ import KeyReader
             return
         }
         guard canPrepareBackup else { status = connection.guidance; return }
+        diagnosticDetails = ""; cleanupComplete = false
         busy = true; backingUp = true; keys = []; saved = ""; reveal = false; copied = false; cancelled = false
-        transferProgress = nil; lastTransferUpdate = nil; transferActivity = nil; lastActivity = nil; recoveryStarted = Date(); transferring = false
-        status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
+        transferProgress = nil; transferActivity = nil; lastActivity = nil; recoveryStarted = Date(); transferring = false
+        status = "Checking the USB connection. Unlock your device and approve Trust This Computer if prompted."
         Task {
             var temporary: URL?
             do {
                 let listing = try await run(backupTool, filteredPrefix + ["--devices"], capture: true)
                 let devices = listing.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
-                guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB iPhone was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the iPhone with official Oura connected, then try again.") }
+                guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB device was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the device with official Oura connected, then try again.") }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let readiness = await USBConnection.checkFiltered(using: backupTool, prefix: filteredPrefix)
                 if case .encrypted = readiness {
@@ -127,25 +136,30 @@ import KeyReader
                 }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
-                status = "Connecting for recovery…"
+                status = "Waiting for device approval…"
                 transferring = true
                 _ = try await run(backupTool, filteredPrefix + [devices[0], folder.path], capture: false, folder: folder, password: temporaryPassword)
                 guard !cancelled else { throw ReaderError.message("Cancelled.") }
                 transferring = false
-                status = "Reading Oura’s ring key…"
+                status = "Finding your key…"
                 let backup = folder.appendingPathComponent("Reader")
                 let result = try await Task.detached { try KeyReader.read(backup) }.value
                 keys = result; selected = result[0].id + result[0].hex
                 status = "Ring key recovered."
             } catch {
                 status = cancelled ? "Cancelled." : error.localizedDescription
+                if !cancelled, let failure = error as? BackupRecoveryFailure { diagnosticDetails = failure.details }
             }
             transferring = false
             if let folder = temporary {
+                let outcome = status
+                status = "Removing temporary data…"
                 do {
-                    try store.delete(folder)
-                    status += keys.isEmpty ? " Temporary data removed." : " Temporary data removed. Save or copy the key before closing."
-                } catch { status += " Cleanup needs attention. Remove the temporary data below." }
+                    let store = self.store
+                    try await Task.detached { try store.delete(folder) }.value
+                    cleanupComplete = true
+                    status = outcome + " Temporary data removed."
+                } catch { status = outcome + " Cleanup needs attention. Remove the temporary data below." }
             }
             busy = false; backingUp = false; process = nil; backups = store.list()
             await refreshConnection()
@@ -191,9 +205,10 @@ import KeyReader
                         let hasActivity = diagnostic.activityUpdates != previousActivity
                         await MainActor.run {
                             if !self.cancelled {
-                                if hasProgress { self.lastTransferUpdate = Date(); self.transferProgress = percent }
+                                if hasProgress { self.transferProgress = percent }
                                 if hasActivity { self.lastActivity = Date(); self.transferActivity = activity }
-                                self.status = "Reading device data…"
+                                if activity?.indexReady == true { self.status = "Finding your key…" }
+                                else if (activity?.bytes ?? 0) > 0 { self.status = "Reading device data…" }
                             }
                         }
                     }
@@ -201,7 +216,7 @@ import KeyReader
             }
             diagnostic.finish()
             process.waitUntilExit()
-            guard process.terminationStatus == 0 else { throw ReaderError.message(diagnostic.failure(exitStatus: process.terminationStatus)) }
+            guard process.terminationStatus == 0 else { throw BackupRecoveryFailure(message: diagnostic.failure(exitStatus: process.terminationStatus), details: diagnostic.details(exitStatus: process.terminationStatus)) }
             return String(data: data, encoding: .utf8) ?? ""
         }.value
         self.process = nil
@@ -217,7 +232,7 @@ import KeyReader
             catch { status = "Could not save the key: " + error.localizedDescription }
         }
     }
-    func copy() { if let key = chosen { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key.hex, forType: .string); copied = true; status = "Key copied only because you requested it. Paste it into Open Oura’s ring-key field." } }
+    func copy() { if let key = chosen { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key.hex, forType: .string); copied = true; status = "Key copied. Paste it into Open Oura’s ring-key field." } }
     func readManaged(_ folder: URL) {
         guard store.isOwned(folder) else { status = "This is not a helper-created backup."; return }
         let candidates = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil))?.filter {
@@ -231,7 +246,7 @@ import KeyReader
     }
     func delete() {
         guard let folder = deleting else { return }
-        do { try store.delete(folder); backups = store.list(); status = "Temporary backup deleted. Your phone and any saved key file are unchanged." }
+        do { try store.delete(folder); backups = store.list(); status = "Temporary backup deleted. Your device and any saved key file are unchanged." }
         catch { status = error.localizedDescription }
         deleting = nil
     }
@@ -242,7 +257,7 @@ import KeyReader
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if Self.helper?.backingUp == true {
             let alert = NSAlert(); alert.messageText = "Finish the operation before quitting"
-            alert.informativeText = "Keep your phone connected while encryption is being restored. During backup creation, you can choose Cancel and wait for restoration to finish."
+            alert.informativeText = "Keep your device connected while encryption is being restored. During backup creation, you can choose Cancel and wait for restoration to finish."
             alert.addButton(withTitle: "Return to helper"); alert.runModal(); return .terminateCancel
         }
         if let helper = Self.helper, !helper.keys.isEmpty, helper.saved.isEmpty, !helper.copied {
@@ -300,7 +315,7 @@ struct ContentView: View {
                         Button("Choose backup…") { helper.existing() }.disabled(!helper.consent || helper.busy)
                     }
                 }
-                if helper.busy || !helper.status.isEmpty {
+                if helper.busy || (!helper.status.isEmpty && helper.keys.isEmpty) {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(alignment: .top, spacing: 12) {
                             if helper.busy && !helper.backingUp { ProgressView().controlSize(.small) }
@@ -317,36 +332,47 @@ struct ContentView: View {
                                 ProgressView().progressViewStyle(.linear).accessibilityLabel("Recovery in progress")
                             }
                             TimelineView(.periodic(from: .now, by: 1)) { context in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack(alignment: .firstTextBaseline) {
-                                        if let activity = helper.transferActivity {
-                                            Text("\(activity.files.formatted()) files processed · \(ByteCountFormatter.string(fromByteCount: activity.bytes, countStyle: .file)) received")
-                                                .monospacedDigit()
-                                        } else if let percent = helper.transferProgress {
-                                            Text("\(percent)% transferred").monospacedDigit()
-                                        }
-                                        Spacer()
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HStack {
                                         Text("Elapsed")
                                         Text(started, style: .timer).monospacedDigit().fixedSize()
-                                    }
+                                        Spacer()
+                                        if helper.transferring, let updated = helper.lastActivity {
+                                            let age = max(0, Int(context.date.timeIntervalSince(updated)))
+                                            if age < 3 { Text("Data is arriving") }
+                                        }
+                                    }.font(.caption).foregroundStyle(.secondary)
                                     if helper.transferring {
                                         if let updated = helper.lastActivity {
                                             let age = max(0, Int(context.date.timeIntervalSince(updated)))
                                             if age >= 20 {
                                                 Text("No new data for \(age) seconds. Check your device for a prompt.")
-                                            } else {
-                                                let freshness = age < 3 ? "Data is arriving." : "Last data received \(age) seconds ago."
-                                                if helper.transferActivity?.indexReady == true {
-                                                    Text("\(freshness) Checking Oura’s files for your key.")
-                                                } else {
-                                                    Text("\(freshness) Waiting for the backup index to identify Oura’s files.")
-                                                }
+                                                    .font(.callout).foregroundStyle(.secondary)
                                             }
                                         } else {
-                                            Text("Waiting for your device. Approve its backup prompt if shown.")
+                                            Text("Keep your device connected and approve its backup prompt if shown.")
+                                                .font(.callout).foregroundStyle(.secondary)
                                         }
+                                        DisclosureGroup("Details") {
+                                            VStack(alignment: .leading, spacing: 6) {
+                                                if let activity = helper.transferActivity {
+                                                    Text("\(activity.files.formatted()) files processed · \(ByteCountFormatter.string(fromByteCount: activity.bytes, countStyle: .file)) received")
+                                                        .monospacedDigit()
+                                                    Text(activity.indexReady ? "Backup index received." : "Waiting for the backup index.")
+                                                }
+                                                if let updated = helper.lastActivity {
+                                                    Text("Last data received \(max(0, Int(context.date.timeIntervalSince(updated)))) seconds ago.")
+                                                }
+                                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                                        }.font(.caption).foregroundStyle(.secondary)
                                     }
-                                }.font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        if !helper.diagnosticDetails.isEmpty {
+                            DisclosureGroup("Details") {
+                                Text(helper.diagnosticDetails).font(.caption.monospaced()).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                             }
                         }
                     }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
@@ -354,21 +380,46 @@ struct ContentView: View {
                 if helper.restorePending {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Restore backup encryption", systemImage: "lock.trianglebadge.exclamationmark").font(.headline)
-                        Text("Reconnect the original phone. Its encryption setting hasn’t been verified yet.").font(.callout).foregroundStyle(.secondary)
+                        Text("Reconnect the original device. Its encryption setting hasn’t been verified yet.").font(.callout).foregroundStyle(.secondary)
                         Button("Restore encryption…") { helper.showPassword = true }.disabled(helper.busy)
                     }
                 }
-                if !helper.keys.isEmpty {
-                    GroupBox("Recovered ring key") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Picker("Ring", selection: $helper.selected) {
-                                ForEach(Array(helper.keys.enumerated()), id: \.offset) { _, key in Text(key.id).tag(key.id + key.hex) }
+                if !helper.keys.isEmpty && !helper.busy {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Key recovered").font(.headline)
+                        VStack(alignment: .leading, spacing: 14) {
+                            if helper.cleanupComplete {
+                                Label("Temporary data removed", systemImage: "checkmark.circle")
+                                    .font(.callout).foregroundStyle(.secondary)
                             }
-                            Toggle("Show key", isOn: $helper.reveal)
-                            if helper.reveal, let key = helper.chosen { Text(key.hex).font(.body.monospaced()).textSelection(.enabled).privacySensitive() }
-                            HStack { Button("Save key file…") { helper.save() }.buttonStyle(.borderedProminent); Button("Copy key") { helper.copy() } }
-                            if !helper.saved.isEmpty { Text("Saved at \(helper.saved)").font(.caption).textSelection(.enabled) }
-                            Text("Paste the key into Open Oura’s ring-key field.").font(.callout).foregroundStyle(.secondary)
+                            if helper.keys.count > 1 {
+                                Picker("Ring entry", selection: $helper.selected) {
+                                    ForEach(Array(helper.keys.enumerated()), id: \.offset) { index, key in
+                                        Text("Ring \(index + 1)").tag(key.id + key.hex)
+                                    }
+                                }
+                            }
+                            Toggle("Show authentication key", isOn: $helper.reveal)
+                            if helper.reveal, let key = helper.chosen {
+                                Text(key.hex).font(.body.monospaced()).textSelection(.enabled).privacySensitive()
+                            }
+                            HStack {
+                                Button("Copy key") { helper.copy() }.buttonStyle(.borderedProminent)
+                                Button("Save key file…") { helper.save() }
+                            }
+                            Text(helper.copied || !helper.saved.isEmpty || !helper.backups.isEmpty
+                                 ? helper.status : "Save or copy the authentication key, then paste it into Open Oura’s ring-key field.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            DisclosureGroup("Details") {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    if let key = helper.chosen {
+                                        Text("Database ring ID: \(key.id)").textSelection(.enabled)
+                                        Text("This identifies the database entry. It is not your authentication key.")
+                                    }
+                                    if !helper.saved.isEmpty { Text("Saved at \(helper.saved)").textSelection(.enabled) }
+                                }.font(.caption).foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                            }
                         }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -416,11 +467,14 @@ struct ContentView: View {
                 do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { break }
             }
         }
+        .onChange(of: helper.selected) { _ in
+            helper.reveal = false; helper.copied = false; helper.saved = ""
+        }
         .sheet(isPresented: $helper.showPassword, onDismiss: { helper.password = "" }) {
             VStack(alignment: .leading, spacing: 16) {
                 Text(helper.restorePending ? "Restore backup encryption" : "Unlock your encrypted backup").font(.title2.weight(.semibold))
                 Text(helper.restorePending
-                     ? "Reconnect the original phone and enter its original backup password."
+                     ? "Reconnect the original device and enter its original backup password."
                      : "Enter your existing computer-backup password to decrypt Oura’s selected files locally. Your device’s encryption setting stays on.")
                 SecureField("Current backup password", text: $helper.password)
                 if !helper.restorePending {
@@ -442,6 +496,6 @@ struct ContentView: View {
         .alert("Delete this temporary backup?", isPresented: $helper.showDelete) {
             Button("Cancel", role: .cancel) { helper.deleting = nil }
             Button("Delete backup", role: .destructive) { helper.delete() }
-        } message: { Text("Remove \(helper.deleting?.path ?? "this temporary backup")? Your iPhone and saved key file are unchanged.") }
+        } message: { Text("Remove \(helper.deleting?.path ?? "this temporary backup")? Your device and saved key file are unchanged.") }
     }
 }

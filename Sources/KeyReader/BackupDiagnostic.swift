@@ -6,6 +6,13 @@ public struct BackupActivity: Decodable, Equatable {
     public let indexReady: Bool
 }
 
+public struct BackupRecoveryFailure: LocalizedError {
+    public let message: String
+    public let details: String
+    public init(message: String, details: String) { self.message = message; self.details = details }
+    public var errorDescription: String? { message }
+}
+
 /// Drain tool output without retaining unrelated filenames or device data.
 public struct BackupDiagnostic {
     private var line = Data()
@@ -66,23 +73,29 @@ public struct BackupDiagnostic {
             switch failure.kind {
             case "OuraPayloadMissing": message = "Oura’s database was listed in the backup but wasn’t received completely. This is a collection failure; don’t repeat the full transfer yet."
             case "OuraDatabaseMissing": message = "Oura’s ring database wasn’t listed in the backup. Confirm official Oura is signed in and has synced; the app may exclude this file from backups."
-            case "StorageLimitError", "NotEnoughDiskSpaceError": message = "Recovery stopped at a storage limit. No key was recovered."
+            case "StorageLimitError", "NotEnoughDiskSpaceError": message = "Recovery stopped at a storage limit. Check your Mac’s free space and use the latest helper before trying again."
             default:
                 switch failure.stage {
                 case "connect", "prepare": message = "Couldn’t prepare recovery from the device. Keep it connected and unlocked."
-                case "transfer": message = "The device transfer failed before key extraction."
+                case "transfer": message = "Couldn’t finish reading your device. Keep it connected, check for a backup prompt, and try again."
                 case "decrypt": message = "Couldn’t unlock or open the backup index. For encrypted backups, verify the existing backup password."
-                case "index": message = "Couldn’t read Oura’s backup index entries."
-                case "payload": message = "Couldn’t read or decrypt Oura’s retained database."
-                default: message = "Recovery failed before a key could be extracted."
+                case "index": message = "Couldn’t read the backup’s file list. Check that you’re using the latest helper before trying again."
+                case "payload": message = "Couldn’t read Oura’s database. Check your backup password if encryption is enabled, and use the latest helper."
+                default: message = "Couldn’t recover a key. Keep your device connected and unlocked, then check the details below."
                 }
             }
-            let code = failure.code.map { "; device code \($0)" } ?? ""
-            return message + " [\(failure.stage)/\(failure.kind)\(payloadDetail)\(code)]"
+            return message
         }
-        if errorCode == 902 { return "Recovery failed in the older collector, which did not report its cause. Update the helper before retrying." }
+        if errorCode == 902 { return "Recovery couldn’t finish. Update the helper before trying again." }
         if errorCode == 901 { return "Recovery cancelled." }
-        let code = errorCode.map { " Device error code: \($0)." } ?? " Tool exit status: \(exitStatus)."
-        return "The device backup did not complete." + code + " Keep the device connected, approve its prompts, and check the Mac’s free disk space before retrying."
+        return "Couldn’t finish reading your device. Keep it connected, approve any backup prompt, and check your Mac’s free space before trying again."
+    }
+    public func details(exitStatus: Int32) -> String {
+        if let failure = reportedFailure {
+            let code = failure.code.map { "; device code \($0)" } ?? ""
+            return "\(failure.stage)/\(failure.kind)\(payloadDetail)\(code)"
+        }
+        if let errorCode { return "\(errorCode == 902 ? "Legacy collector code" : "Device error code"): \(errorCode)" }
+        return "Tool exit status: \(exitStatus)"
     }
 }
