@@ -40,7 +40,7 @@ class FilterTests(unittest.TestCase):
         import plistlib
         selected = 'a' * 40
         decoded = []
-        entry = SimpleNamespace(domain=filtered.DOMAIN, relative_path='UUID/assa.sqlite', read_bytes=lambda: b'fixture-oura-db')
+        entry = SimpleNamespace(domain=filtered.DOMAIN, relative_path='UUID/assa.sqlite', size=len(b'fixture-oura-db'), read_bytes=lambda: b'fixture-oura-db')
         def read_entry(file_id):
             decoded.append(file_id)
             self.assertEqual(file_id, selected)
@@ -87,5 +87,33 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 async with service.device_link(object(), Path('/unused'), filter_callback=None): pass
         asyncio.run(run())
+
+class DiagnosticTests(unittest.TestCase):
+    def test_missing_or_truncated_selected_payload_has_a_specific_failure(self):
+        from unittest.mock import patch
+        import sqlite3
+        for missing in [False, True]:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                manifest = root / 'Manifest.db'
+                with sqlite3.connect(manifest) as db:
+                    db.execute('CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT)')
+                    db.execute('INSERT INTO Files VALUES (?, ?, ?)', ('a'*40, filtered.DOMAIN, 'UUID/assa.sqlite'))
+                def content():
+                    if missing: raise FileNotFoundError('/private/not-for-logs')
+                    return b''
+                entry = SimpleNamespace(domain=filtered.DOMAIN, relative_path='UUID/assa.sqlite', size=16, read_bytes=content)
+                fake = SimpleNamespace(_manifest_db=SimpleNamespace(path=manifest), get_entry_by_id=lambda _: entry)
+                phase = {}
+                with patch('pyiosbackup.Backup.from_path', return_value=fake), self.assertRaises(filtered.OuraPayloadMissing):
+                    filtered.make_readable(root, root/'Reader', '', phase)
+                self.assertEqual(phase['stage'], 'payload')
+
+    def test_diagnostics_keep_only_safe_stage_kind_and_numeric_code(self):
+        error = ValueError("secret key /private/health.db {'ErrorCode': 104, 'ErrorDescription': 'private'}")
+        result = filtered.safe_failure(error, 'transfer')
+        self.assertEqual(result, {'stage': 'transfer', 'kind': 'ValueError', 'deviceCode': 104})
+        self.assertNotIn('secret', str(result)); self.assertNotIn('private', str(result))
+        self.assertEqual(filtered.safe_failure(RuntimeError('private'), 'private'), {'stage': 'unknown', 'kind': 'UnknownError'})
 
 if __name__ == '__main__': unittest.main()

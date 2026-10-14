@@ -21,6 +21,24 @@ NAMES = {'assa.sqlite', 'assa.sqlite-wal', 'assa.sqlite-shm'}
 PATTERN = re.compile(r'^AppDomain-com\.ouraring\.oura(?:/|-)(?:[^/]+/)*assa\.sqlite(?:-wal|-shm)?$')
 
 
+class OuraPayloadMissing(Exception): pass
+class OuraDatabaseMissing(Exception): pass
+class StorageLimitError(OSError): pass
+
+SAFE_STAGES = {'connect', 'prepare', 'transfer', 'decrypt', 'index', 'payload', 'unknown'}
+SAFE_KINDS = {'FileNotFoundError', 'PermissionError', 'OSError', 'ValueError', 'DatabaseError', 'OperationalError', 'BackupPasswordIsRequired', 'InvalidPassword', 'CorruptedEntryError', 'MissingEntryError', 'NotEnoughDiskSpaceError', 'ConnectionTerminatedError', 'ConnectionResetError', 'ConnectionAbortedError', 'TimeoutError', 'PyMobileDevice3Exception', 'OuraPayloadMissing', 'OuraDatabaseMissing', 'StorageLimitError'}
+
+def safe_failure(error, stage):
+    kind = type(error).__name__
+    result = {'stage': stage if stage in SAFE_STAGES else 'unknown', 'kind': kind if kind in SAFE_KINDS else 'UnknownError'}
+    # Parse only the numeric protocol code; never return exception text or traceback.
+    match = re.search(r"['\"]ErrorCode['\"]:\s*(-?\d+)", str(error))
+    if match:
+        code = int(match.group(1))
+        if -(2**31) <= code < 2**31: result['deviceCode'] = code
+    return result
+
+
 def keep_file(file):
     name = file.device_name
     return bool(name and PATTERN.fullmatch(name) and '..' not in name.split('/'))
@@ -41,13 +59,16 @@ class OuraFilter:
         return '..' not in parts and Path(name).name in NAMES and self.container_uuid in [p.upper() for p in parts]
 
 
-def make_readable(backup_path, destination, password):
+def make_readable(backup_path, destination, password, phase=None):
     """Create a tiny reader-compatible index, decrypting only retained Oura payloads."""
     from pyiosbackup import Backup
+    phase = phase if phase is not None else {}
+    phase['stage'] = 'decrypt'
     budget = StorageBudget(destination.parent, limit=1024 * 1024 * 1024)
     manifest = backup_path / 'Manifest.db'
     if manifest.exists(): budget.account(manifest.stat().st_size)
     backup = Backup.from_path(backup_path, password=password)
+    phase['stage'] = 'index'
     destination.mkdir(mode=0o700)
     with sqlite3.connect(destination / 'Manifest.db') as index:
         index.execute('CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT)')
@@ -56,6 +77,8 @@ def make_readable(backup_path, destination, password):
         with sqlite3.connect(f'file:{backup._manifest_db.path}?mode=ro&immutable=1', uri=True) as manifest_db:
             rows = manifest_db.execute(
                 "SELECT fileID FROM Files WHERE domain = ? AND (relativePath = 'assa.sqlite' OR relativePath GLOB '*/assa.sqlite' OR relativePath = 'assa.sqlite-wal' OR relativePath GLOB '*/assa.sqlite-wal' OR relativePath = 'assa.sqlite-shm' OR relativePath GLOB '*/assa.sqlite-shm')", (DOMAIN,)).fetchall()
+        if not rows: raise OuraDatabaseMissing()
+        phase['stage'] = 'payload'
         for (file_id,) in rows:
             if not re.fullmatch(r'[0-9a-fA-F]{40}', file_id): raise ValueError('Invalid Oura file identifier')
             entry = backup.get_entry_by_id(file_id)
@@ -65,7 +88,9 @@ def make_readable(backup_path, destination, password):
                 raise ValueError('Unsafe Oura path')
             file_id = hashlib.sha1((DOMAIN + '-' + entry.relative_path).encode()).hexdigest()
             # Entry.read_bytes decrypts just this payload; no extract_all/unback call.
-            content = entry.read_bytes()
+            try: content = entry.read_bytes()
+            except FileNotFoundError: raise OuraPayloadMissing() from None
+            if len(content) != entry.size: raise OuraPayloadMissing()
             budget.account(len(content))
             (destination / file_id).write_bytes(content)
             index.execute('INSERT INTO Files VALUES (?, ?, ?)', (file_id, DOMAIN, entry.relative_path))
@@ -77,7 +102,7 @@ class StorageBudget:
         self.root, self.limit, self.reserve, self.written = root, limit, reserve, 0
     def check(self, size):
         if self.written + size > self.limit or shutil.disk_usage(self.root).free - size < self.reserve:
-            raise OSError('Filtered storage budget exceeded')
+            raise StorageLimitError()
     def account(self, size):
         self.check(size)
         self.written += size
@@ -125,14 +150,16 @@ def filtered_service_type():
     return FilteredService
 
 
-async def collect(device, folder, password):
+async def collect(device, folder, password, phase):
     from pymobiledevice3.lockdown import create_using_usbmux
     scratch = folder / '.scratch'
     scratch.mkdir(mode=0o700)
     # Third-party manifest decryption uses temporary files: keep them inside our owned folder.
     tempfile.tempdir = str(scratch)
+    phase['stage'] = 'connect'
     lockdown = await create_using_usbmux(serial=device, connection_type='USB', autopair=False)
     try:
+        phase['stage'] = 'prepare'
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
         async with InstallationProxyService(lockdown) as apps:
             app = await apps.lookup({'BundleIDs': ['com.ouraring.oura'], 'ReturnAttributes': ['Container']})
@@ -141,11 +168,12 @@ async def collect(device, folder, password):
         def progress(value):
             if isinstance(value, (int, float)) and 0 <= value <= 100:
                 print('OURA_PROGRESS ' + str(int(value)), flush=True)
+        phase['stage'] = 'transfer'
         async with filtered_service_type()(lockdown) as service:
             await service.backup(full=True, backup_directory=folder, filter_callback=selection, progress_callback=progress)
-        make_readable(folder / device, folder / 'Reader', password)
+        make_readable(folder / device, folder / 'Reader', password, phase)
     finally:
-        await lockdown.close()
+        with suppress(Exception): await lockdown.close()
 
 
 async def usb_devices():
@@ -196,14 +224,15 @@ def main():
     if not folder.is_dir() or (folder / '.oura-helper-owned').read_text() != folder.name:
         raise ValueError('Not helper-owned')
     secret = os.environ.pop('BACKUP_PASSWORD', '')
+    phase = {'stage': 'connect'}
     try:
-        asyncio.run(collect(device, folder, secret))
+        asyncio.run(collect(device, folder, secret, phase))
     except KeyboardInterrupt:
         print('ErrorCode 901: Cancelled', flush=True)
         return 1
     except Exception as error:
         # Avoid library exception messages, which may contain unrelated paths or device data.
-        print('ErrorCode 902: ' + type(error).__name__, flush=True)
+        print('OURA_FAILURE ' + json.dumps(safe_failure(error, phase['stage'])), flush=True)
         return 1
     return 0
 

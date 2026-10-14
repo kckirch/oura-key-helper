@@ -4,7 +4,7 @@ A small open-source Mac companion to recover an existing Oura ring authenticatio
 
 ## Current status
 
-**Prototype 0.2.2.** The native reader has recovered a known working key from an official Oura database. Twenty-seven Swift tests, five Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
+**Prototype 0.2.3.** The native reader has recovered a known working key from an official Oura database. Twenty-nine Swift tests, seven Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
 
 ## Use
 
@@ -73,3 +73,7 @@ The host filter reduces storage, not what iOS transmits. No Oura-only device-sid
 The local reader now selects Oura rows with parameterized SQLite before decoding archived file metadata, rather than iterating every app's entries. A fixture with 10,000 unrelated entries verifies only the selected Oura entry is decoded. This reduces local processing work; it does not establish a faster first USB transfer.
 
 Oura's targeted installation metadata supplies its container UUID when available, allowing strict selection of backup staging paths that omit the app domain. Unknown staging paths are rejected rather than retaining other apps' databases. Full key recovery with this correction is unverified. The previous live 0.2.0 run ended with generic error 902, not a recovered key. Early stopping has not been implemented: correctness requires the needed database/sidecars and, for encrypted backups, manifest/key metadata.
+
+## Failure diagnostics
+
+The backend reports only a fixed recovery stage, an allowlisted exception category, and a numeric device code when present. Raw exception text, paths, keys, and tracebacks are not shown or saved. The UI distinguishes transfer, backup-index/decryption, and missing/truncated Oura-payload failures. Legacy code 902 is a helper catch-all, not an Apple device error, and cannot establish the failed attempt's cause. Selected payload lengths must match their manifest metadata before being passed to the reader. Cleanup still runs after failure.
