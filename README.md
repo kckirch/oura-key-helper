@@ -1,8 +1,8 @@
 # Oura Key Helper
 
-Recover an Oura ring’s existing authentication key from the official iPhone or iPad app. Built for importing an existing pairing into [Open Oura](https://github.com/Th0rgal/open_oura).
+A Mac app for getting your Oura ring’s existing authentication key from an iPhone or iPad—without jailbreaking the device, using a rooted Android phone, or manually extracting files from a backup. Use the key to import your existing pairing into [Open Oura](https://github.com/Th0rgal/open_oura).
 
-The Mac app uses Apple’s USB backup service. No jailbreak or ring reset is needed.
+Connect your device over USB and the helper handles collection, extraction, and cleanup. If you already have an **unencrypted iPhone or iPad backup** containing Oura’s data, you can read the key from that instead. No ring reset is needed.
 
 ## Download
 
@@ -19,7 +19,7 @@ Requires an Apple Silicon Mac running macOS 13 or later. USB support is bundled;
 
 Allow about 10–15 minutes; devices with more data may take longer. Our iPad runs took about 10–11 minutes. The progress panel shows elapsed time and activity, with file counts under **Details**.
 
-You can also select an existing, unencrypted Finder backup under **Use an existing backup**. The helper leaves that backup alone.
+To use an existing unencrypted iOS backup, choose **Use an existing backup** and select its folder. It must contain Oura’s database from an app that had already synced the ring. You don’t need to create another backup, and the helper won’t delete or modify the one you select.
 
 ## How it works
 
