@@ -84,6 +84,24 @@ final class USBConnectionTests: XCTestCase {
         XCTAssertNil(USBConnection.ouraInstalled(in: "not a plist"))
         XCTAssertNil(USBConnection.ouraInstalled(in: try plist(["error": "unverified"])))
     }
+    func testAbsentEncryptionFlagUsesVerifiedBackupDomain() async throws {
+        let domain = try plist(["CloudBackupEnabled": false, "Version": "2.0"] as [String: Any])
+        try stub(info, "if [ \"$5\" = '--xml' ]; then printf '%s' '" + domain + "'; fi")
+        var status = await check()
+        XCTAssertEqual(status, .connected("Test iPhone"))
+        try stub(info, "if [ \"$5\" = '--xml' ]; then printf broken; fi")
+        status = await check()
+        XCTAssertFalse(status.canBackUp)
+    }
+    func testBackupDomainEncryptionParserRejectsMalformedFlags() throws {
+        XCTAssertEqual(USBConnection.backupEncryption(in: try plist(["WillEncrypt": true])), true)
+        XCTAssertEqual(USBConnection.backupEncryption(in: try plist(["WillEncrypt": false])), false)
+        XCTAssertEqual(USBConnection.backupEncryption(in: try plist(["Version": "2.0"])), false)
+        XCTAssertNil(USBConnection.backupEncryption(in: try plist(["WillEncrypt": "false"])))
+        XCTAssertNil(USBConnection.backupEncryption(in: try plist(["WillEncrypt": 1])))
+        XCTAssertNil(USBConnection.backupEncryption(in: ""))
+        XCTAssertNil(USBConnection.backupEncryption(in: try plist([String]())))
+    }
     func testMissingVerificationToolsCannotStartBackup() async {
         var status = await USBConnection.check(using: device, info: nil, installer: installer)
         XCTAssertEqual(status, .missingTools); XCTAssertFalse(status.canBackUp)

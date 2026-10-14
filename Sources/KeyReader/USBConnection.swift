@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 public enum USBConnection: Equatable {
     case checking, missingTools, none, unavailable
@@ -57,15 +58,29 @@ public enum USBConnection: Equatable {
             if devices.count > 1 { return .multiple(devices.count) }
             let name = output(tool, [devices[0]]) ?? ""
             guard let info, let installer else { return .missingTools }
-            guard let encryption = output(info, ["-u", devices[0], "-q", "com.apple.mobile.backup", "-k", "WillEncrypt"]),
-                  ["true", "false"].contains(encryption) else { return .needsTrust(name) }
+            guard let flag = output(info, ["-u", devices[0], "-q", "com.apple.mobile.backup", "-k", "WillEncrypt"]) else { return .needsTrust(name) }
+            let encryption: Bool
+            if ["true", "false"].contains(flag) { encryption = flag == "true" }
+            else if flag.isEmpty,
+                    let domain = output(info, ["-u", devices[0], "-q", "com.apple.mobile.backup", "--xml"]),
+                    let enabled = backupEncryption(in: domain) { encryption = enabled }
+            else { return .needsTrust(name) }
             // Request only official Oura's identifier, not a list of installed apps.
             guard let result = output(installer, ["-u", devices[0], "list", "--bundle-identifier", "com.ouraring.oura", "--attribute", "CFBundleIdentifier", "--xml"]),
                   let installed = ouraInstalled(in: result) else { return .ouraCheckUnavailable(name) }
             guard installed else { return .missingOura(name) }
-            if encryption == "true" { return .encrypted(name) }
+            if encryption { return .encrypted(name) }
             return .connected(name)
         }.value
+    }
+    public static func backupEncryption(in response: String) -> Bool? {
+        guard let data = response.data(using: .utf8),
+              let domain = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] else { return nil }
+        // Like idevicebackup2, an absent WillEncrypt means encryption has not been enabled.
+        // Only accept its absence from a successfully read backup-domain dictionary.
+        guard let value = domain["WillEncrypt"] else { return false }
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
     }
     public static func ouraInstalled(in response: String) -> Bool? {
         guard let object = try? PropertyListSerialization.propertyList(from: Data(response.utf8), format: nil) else { return nil }

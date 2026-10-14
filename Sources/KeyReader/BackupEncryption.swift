@@ -38,7 +38,11 @@ public struct BackupEncryption {
     private func encrypted(_ device: String, command: Command) async throws -> Bool {
         let value = try await command(["-u", device, "-q", "com.apple.mobile.backup", "-k", "WillEncrypt"], nil)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard ["true", "false"].contains(value) else { throw ReaderError.message("Couldn’t verify backup encryption. Reconnect and unlock the original phone.") }
-        return value == "true"
+        if ["true", "false"].contains(value) { return value == "true" }
+        if value.isEmpty {
+            let domain = try await command(["-u", device, "-q", "com.apple.mobile.backup", "--xml"], nil)
+            if let enabled = USBConnection.backupEncryption(in: domain) { return enabled }
+        }
+        throw ReaderError.message("Couldn’t verify backup encryption. Reconnect and unlock the original phone.")
     }
 }
