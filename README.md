@@ -4,7 +4,7 @@ A small open-source Mac companion to recover an existing Oura ring authenticatio
 
 ## Current status
 
-**Prototype 0.2.1.** The native reader has recovered a known working key from an official Oura database. Twenty-seven Swift tests, four Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
+**Prototype 0.2.2.** The native reader has recovered a known working key from an official Oura database. Twenty-seven Swift tests, five Python filtering/decryption-adapter tests, and a Python-to-Swift extraction fixture pass. A live iPad test verified low-storage transfer of thousands of files, but the diagnostic window ended before key recovery. Complete filtered collection and encrypted-backup decryption still require hardware validation. Apple Silicon build, ad-hoc signed, not notarized.
 
 ## Use
 
@@ -65,3 +65,11 @@ Quit the app before rebuilding. Source includes no actual ring keys, phone datab
 - [pymobiledevice3 filtering documentation](https://github.com/doronz88/pymobiledevice3/blob/master/docs/guides/cli-recipes.md) and [backup implementation](https://github.com/doronz88/pymobiledevice3/blob/master/pymobiledevice3/services/mobilebackup2.py).
 
 The separate USB component and exact GPL/LGPL dependency sources are bundled. See `THIRD-PARTY.md` for licenses and rebuild instructions. This is an independent interoperability prototype, not an official Oura product. Oura/iOS changes can prevent extraction.
+
+## First-run speed limits
+
+The host filter reduces storage, not what iOS transmits. No Oura-only device-side Backup request has been verified. A standard USB House Arrest container request for Oura was denied on the test iPad; no jailbreak/root interface was used. Existing unencrypted backups avoid a new transfer when they contain a still-valid key.
+
+The local reader now selects Oura rows with parameterized SQLite before decoding archived file metadata, rather than iterating every app's entries. A fixture with 10,000 unrelated entries verifies only the selected Oura entry is decoded. This reduces local processing work; it does not establish a faster first USB transfer.
+
+Oura's targeted installation metadata supplies its container UUID when available, allowing strict selection of backup staging paths that omit the app domain. Unknown staging paths are rejected rather than retaining other apps' databases. Full key recovery with this correction is unverified. The previous live 0.2.0 run ended with generic error 902, not a recovered key. Early stopping has not been implemented: correctness requires the needed database/sidecars and, for encrypted backups, manifest/key metadata.

@@ -29,8 +29,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.kck.openoura.key-helper</string>
 <key>CFBundleExecutable</key><string>OuraKeyHelper</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.1</string>
-<key>CFBundleVersion</key><string>10</string>
+<key>CFBundleShortVersionString</key><string>0.2.2</string>
+<key>CFBundleVersion</key><string>11</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

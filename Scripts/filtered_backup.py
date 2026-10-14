@@ -14,6 +14,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import uuid
 
 DOMAIN = 'AppDomain-com.ouraring.oura'
 NAMES = {'assa.sqlite', 'assa.sqlite-wal', 'assa.sqlite-shm'}
@@ -23,6 +24,21 @@ PATTERN = re.compile(r'^AppDomain-com\.ouraring\.oura(?:/|-)(?:[^/]+/)*assa\.sql
 def keep_file(file):
     name = file.device_name
     return bool(name and PATTERN.fullmatch(name) and '..' not in name.split('/'))
+
+
+class OuraFilter:
+    def __init__(self, container=None):
+        self.container_uuid = None
+        if isinstance(container, str):
+            try: self.container_uuid = str(uuid.UUID(Path(container).name)).upper()
+            except ValueError: pass
+    def __call__(self, file):
+        if keep_file(file): return True
+        name = file.device_name
+        if not name or not self.container_uuid: return False
+        if not name.startswith(('/.b/', '/.ba/', '/var/mobile/Containers/Data/Application/', '/private/var/mobile/Containers/Data/Application/')): return False
+        parts = name.split('/')
+        return '..' not in parts and Path(name).name in NAMES and self.container_uuid in [p.upper() for p in parts]
 
 
 def make_readable(backup_path, destination, password):
@@ -35,7 +51,14 @@ def make_readable(backup_path, destination, password):
     destination.mkdir(mode=0o700)
     with sqlite3.connect(destination / 'Manifest.db') as index:
         index.execute('CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT)')
-        for entry in backup.iter_entries():
+        # The pinned library's iter_entries() decodes every app's archived metadata.
+        # Select file IDs with SQLite first; decode only our own three payload types.
+        with sqlite3.connect(f'file:{backup._manifest_db.path}?mode=ro&immutable=1', uri=True) as manifest_db:
+            rows = manifest_db.execute(
+                "SELECT fileID FROM Files WHERE domain = ? AND (relativePath = 'assa.sqlite' OR relativePath GLOB '*/assa.sqlite' OR relativePath = 'assa.sqlite-wal' OR relativePath GLOB '*/assa.sqlite-wal' OR relativePath = 'assa.sqlite-shm' OR relativePath GLOB '*/assa.sqlite-shm')", (DOMAIN,)).fetchall()
+        for (file_id,) in rows:
+            if not re.fullmatch(r'[0-9a-fA-F]{40}', file_id): raise ValueError('Invalid Oura file identifier')
+            entry = backup.get_entry_by_id(file_id)
             if entry.domain != DOMAIN or Path(entry.relative_path).name not in NAMES:
                 continue
             if entry.relative_path.startswith('/') or '..' in entry.relative_path.split('/'):
@@ -89,7 +112,7 @@ def filtered_service_type():
     class FilteredService(Mobilebackup2Service):
         @asynccontextmanager
         async def device_link(self, backup_directory, filter_callback=None, password=''):
-            if filter_callback is not keep_file: raise ValueError('Unfiltered collection is forbidden')
+            if not isinstance(filter_callback, OuraFilter): raise ValueError('Unfiltered collection is forbidden')
             await self.connect()
             dl = FilteredDeviceLink(self._service, backup_directory,
                 preserve_file=lambda file_name, device_name: self.should_preserve_backup_file(file_name, device_name, filter_callback))
@@ -110,11 +133,16 @@ async def collect(device, folder, password):
     tempfile.tempdir = str(scratch)
     lockdown = await create_using_usbmux(serial=device, connection_type='USB', autopair=False)
     try:
+        from pymobiledevice3.services.installation_proxy import InstallationProxyService
+        async with InstallationProxyService(lockdown) as apps:
+            app = await apps.lookup({'BundleIDs': ['com.ouraring.oura'], 'ReturnAttributes': ['Container']})
+        container = (app or {}).get('com.ouraring.oura', {}).get('Container')
+        selection = OuraFilter(container)
         def progress(value):
             if isinstance(value, (int, float)) and 0 <= value <= 100:
                 print('OURA_PROGRESS ' + str(int(value)), flush=True)
         async with filtered_service_type()(lockdown) as service:
-            await service.backup(full=True, backup_directory=folder, filter_callback=keep_file, progress_callback=progress)
+            await service.backup(full=True, backup_directory=folder, filter_callback=selection, progress_callback=progress)
         make_readable(folder / device, folder / 'Reader', password)
     finally:
         await lockdown.close()
