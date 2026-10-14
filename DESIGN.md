@@ -1,0 +1,2 @@
+# Native Mac utility
+Operate mode: one task, explicit consent, native system controls. Use SwiftUI system typography, semantic colors, Form sections, a clear progress state, native file pickers and save dialogs. Keep keys hidden by default. Backup creation and existing-backup reading are distinct actions. Deletion is a destructive action naming the helper-owned folder and requires confirmation. Always show failures and retained temporary backups. No custom dashboard styling, assurance badges, or unsupported privacy claims.
