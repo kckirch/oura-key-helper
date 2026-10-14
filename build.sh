@@ -19,7 +19,7 @@ mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/Source"
 cp "$binary_dir/OuraKeyHelper" "$app_dir/Contents/MacOS/OuraKeyHelper"
 strip -S "$app_dir/Contents/MacOS/OuraKeyHelper"
 cp Package.swift README.md LICENSE LICENSE-GPL-3.0 THIRD-PARTY.md PRODUCT.md DESIGN.md build.sh "$app_dir/Contents/Resources/Source/"
-/usr/bin/rsync -a --exclude=__pycache__ Sources Tests Scripts "$app_dir/Contents/Resources/Source/"
+/usr/bin/rsync -a --exclude=__pycache__ Sources Tests Scripts docs "$app_dir/Contents/Resources/Source/"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
