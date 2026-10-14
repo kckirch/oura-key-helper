@@ -3,6 +3,7 @@ import AppKit
 import KeyReader
 
 @MainActor final class Helper: ObservableObject {
+    @Published var connection: USBConnection = .checking
     @Published var consent = false
     @Published var busy = false
     @Published var backingUp = false
@@ -27,6 +28,12 @@ import KeyReader
     func executable(_ name: String) -> URL? {
         ["/opt/homebrew/bin/", "/usr/local/bin/"].map { URL(fileURLWithPath: $0 + name) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
+    func refreshConnection() async {
+        guard let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), executable("idevicebackup2") != nil else {
+            connection = .missingTools; return
+        }
+        connection = await USBConnection.check(using: deviceTool, info: infoTool)
+    }
     func existing() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.message = "Choose the iPhone backup folder containing Manifest.db. This backup will never be deleted by the helper."
@@ -45,10 +52,11 @@ import KeyReader
         }
     }
     func createBackup() {
-        guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id") else {
+        guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo") else {
             status = "Backup creation needs libimobiledevice. Install it with Homebrew: brew install libimobiledevice. You can still read an existing backup."
             return
         }
+        guard connection.canBackUp else { status = connection.guidance; return }
         busy = true; backingUp = true; keys = []; saved = ""; reveal = false; cancelled = false
         status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
         Task {
@@ -57,6 +65,9 @@ import KeyReader
                 let listing = try await run(deviceTool, ["-l"], capture: true)
                 let devices = listing.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
                 guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB iPhone was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the iPhone with official Oura connected, then try again.") }
+                guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
+                let readiness = await USBConnection.check(using: deviceTool, info: infoTool)
+                guard readiness.canBackUp else { connection = readiness; throw ReaderError.message(readiness.guidance) }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
                 status = "Creating a temporary local phone backup. This can copy other app data too. Keep the iPhone connected; you can cancel below."
@@ -82,6 +93,7 @@ import KeyReader
         process.standardError = FileHandle.nullDevice
         self.process = process
         try process.run()
+        pipe?.fileHandleForWriting.closeFile()
         let marker = folder?.appendingPathComponent(".backup-active-pid")
         if let marker { try? Data(String(process.processIdentifier).utf8).write(to: marker) }
         defer { if let marker { try? FileManager.default.removeItem(at: marker) } }
@@ -165,13 +177,23 @@ struct ContentView: View {
                         Text("Encrypted backups are not supported in this prototype. Encryption settings are never changed.").font(.callout).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        if helper.connection == .checking { ProgressView().controlSize(.small) }
+                        Label(helper.connection.title, systemImage: helper.connection.canBackUp ? "iphone" : "cable.connector")
+                            .font(.headline)
+                        Spacer()
+                        Button("Check again") { Task { await helper.refreshConnection() } }
+                            .disabled(helper.connection == .checking)
+                    }
+                    Text(helper.connection.guidance).font(.callout).foregroundStyle(.secondary)
+                }
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("This is my ring/account, or I have the owner’s permission to extract its key.", isOn: $helper.consent)
                     HStack(spacing: 12) {
                         Button("Read existing backup…") { helper.existing() }
-                        Button("Create temporary backup…") { helper.showBackupConsent = true }.buttonStyle(.borderedProminent)
+                        Button("Create temporary backup…") { helper.showBackupConsent = true }.buttonStyle(.borderedProminent).disabled(!helper.connection.canBackUp)
                     }.disabled(!helper.consent || helper.busy)
-                    Text("For a new backup, connect the iPhone that already uses official Oura, unlock it, and approve Trust This Computer.").font(.callout).foregroundStyle(.secondary)
                 }
                 HStack(alignment: .top, spacing: 12) {
                     if helper.busy { ProgressView().controlSize(.small) }
@@ -216,6 +238,12 @@ struct ContentView: View {
                     Button("View source") { helper.viewSource() }
                 }
             }.padding(28)
+        }
+        .task {
+            while !Task.isCancelled {
+                await helper.refreshConnection()
+                do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { break }
+            }
         }
         .alert("Create a temporary phone backup?", isPresented: $helper.showBackupConsent) {
             Button("Cancel", role: .cancel) {}
