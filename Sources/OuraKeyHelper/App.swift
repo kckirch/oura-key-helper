@@ -308,6 +308,8 @@ struct ContentView: View {
                             if helper.backingUp && !helper.restoring { Button("Cancel") { helper.cancel() } }
                         }
                         if helper.backingUp, let started = helper.recoveryStarted {
+                            Text("Allow about 10–15 minutes. Devices with more data may take longer.")
+                                .font(.callout).foregroundStyle(.secondary)
                             if helper.transferring, let percent = helper.transferProgress {
                                 ProgressView(value: Double(percent), total: 100).progressViewStyle(.linear)
                                     .accessibilityLabel("Device transfer").accessibilityValue("\(percent) percent")
