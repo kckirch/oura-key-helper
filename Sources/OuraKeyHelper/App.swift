@@ -7,7 +7,7 @@ import KeyReader
     @Published var consent = false
     @Published var busy = false
     @Published var backingUp = false
-    @Published var status = "Choose an existing backup, or connect your unlocked iPhone to create one."
+    @Published var status = ""
     @Published var keys: [RingKey] = []
     @Published var selected = ""
     @Published var reveal = false
@@ -41,12 +41,12 @@ import KeyReader
         if panel.runModal() == .OK, let folder = panel.url { extract(folder) }
     }
     func extract(_ folder: URL) {
-        busy = true; keys = []; saved = ""; reveal = false; status = "Reading the backup index and Oura’s ring key table…"
+        busy = true; keys = []; saved = ""; reveal = false; status = "Reading Oura’s ring key…"
         Task {
             do {
                 let result = try await Task.detached { try KeyReader.read(folder) }.value
                 keys = result; selected = result[0].id + result[0].hex
-                status = "Found \(result.count == 1 ? "one ring key" : "\(result.count) ring keys"). Save the key, then delete any temporary backup you no longer need."
+                status = "Found \(result.count == 1 ? "one ring key" : "\(result.count) ring keys")."
             } catch { status = error.localizedDescription }
             busy = false; backups = store.list()
         }
@@ -70,7 +70,7 @@ import KeyReader
                 guard readiness.canBackUp else { connection = readiness; throw ReaderError.message(readiness.guidance) }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
-                status = "Creating a temporary local phone backup. This can copy other app data too. Keep the iPhone connected; you can cancel below."
+                status = "Creating a temporary phone backup…"
                 _ = try await run(backupTool, ["-u", devices[0], "backup", "--full", folder.path], capture: false, folder: folder)
                 guard !cancelled else { throw ReaderError.message("Backup cancelled. The partial backup is listed below; you can delete it now.") }
                 backingUp = false
@@ -78,7 +78,7 @@ import KeyReader
                 let backup = folder.appendingPathComponent(devices[0])
                 let result = try await Task.detached { try KeyReader.read(backup) }.value
                 keys = result; selected = result[0].id + result[0].hex
-                status = "Ring key found. Save it, then use Delete this backup below. The backup remains until you choose to delete it."
+                status = "Ring key found. Save it before deleting the backup."
             } catch {
                 status = (cancelled ? "Backup cancelled." : error.localizedDescription) + (temporary != nil ? " Your temporary backup remains listed below; you can delete it now." : "")
             }
@@ -153,13 +153,14 @@ import KeyReader
     var body: some Scene {
         WindowGroup {
             ContentView(helper: helper)
-                .frame(minWidth: 650, idealWidth: 700, minHeight: 650, idealHeight: 760)
+                .frame(minWidth: 620, idealWidth: 680, minHeight: 460, idealHeight: 580)
                 .onAppear { QuitGuard.helper = helper; NSApplication.shared.activate(ignoringOtherApps: true) }
         }.windowResizability(.contentMinSize)
     }
 }
 struct ContentView: View {
     @ObservedObject var helper: Helper
+    @State private var showPrivacy = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -167,15 +168,8 @@ struct ContentView: View {
                     Image(systemName: "iphone.and.arrow.forward").font(.system(size: 34)).foregroundStyle(.blue).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Recover your Oura ring key").font(.title2.weight(.semibold))
-                        Text("Use the existing pairing. No jailbreak or ring reset.").foregroundStyle(.secondary)
+                        Text("Import your existing pairing into Open Oura.").foregroundStyle(.secondary)
                     }
-                }
-                GroupBox("What happens on your Mac") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("The extractor reads the backup’s file index, Oura’s database, and its ring key table. It does not analyze other apps’ files. The helper does not upload data, and keys are hidden until you choose to reveal, copy, or save them.")
-                        Text("Creating a backup is different: Apple’s backup service can copy other phone data into a temporary folder. You can reveal that folder, keep it, or delete it here after the backup stops.").foregroundStyle(.secondary)
-                        Text("Encrypted backups are not supported in this prototype. Encryption settings are never changed.").font(.callout).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -189,17 +183,19 @@ struct ContentView: View {
                     Text(helper.connection.guidance).font(.callout).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle("This is my ring/account, or I have the owner’s permission to extract its key.", isOn: $helper.consent)
+                    Toggle("I own this ring or have the owner’s permission.", isOn: $helper.consent)
                     HStack(spacing: 12) {
                         Button("Read existing backup…") { helper.existing() }
                         Button("Create temporary backup…") { helper.showBackupConsent = true }.buttonStyle(.borderedProminent).disabled(!helper.connection.canBackUp)
                     }.disabled(!helper.consent || helper.busy)
                 }
-                HStack(alignment: .top, spacing: 12) {
-                    if helper.busy { ProgressView().controlSize(.small) }
-                    Text(helper.status).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                    if helper.backingUp { Button("Cancel") { helper.cancel() } }
-                }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                if helper.busy || !helper.status.isEmpty {
+                    HStack(alignment: .top, spacing: 12) {
+                        if helper.busy { ProgressView().controlSize(.small) }
+                        Text(helper.status).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        if helper.backingUp { Button("Cancel") { helper.cancel() } }
+                    }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                }
                 if !helper.keys.isEmpty {
                     GroupBox("Recovered ring key") {
                         VStack(alignment: .leading, spacing: 12) {
@@ -210,16 +206,21 @@ struct ContentView: View {
                             if helper.reveal, let key = helper.chosen { Text(key.hex).font(.body.monospaced()).textSelection(.enabled).privacySensitive() }
                             HStack { Button("Save key file…") { helper.save() }.buttonStyle(.borderedProminent); Button("Copy key") { helper.copy() } }
                             if !helper.saved.isEmpty { Text("Saved at \(helper.saved)").font(.caption).textSelection(.enabled) }
-                            Text("Paste the 32-character key into Open Oura’s existing ring-key field. Saving this file does not alter the ring.").font(.callout).foregroundStyle(.secondary)
+                            Text("Paste the key into Open Oura’s ring-key field.").font(.callout).foregroundStyle(.secondary)
                         }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 if !helper.backups.isEmpty {
-                    GroupBox("Temporary backups you control") {
+                    GroupBox("Temporary backups") {
                         VStack(alignment: .leading, spacing: 16) {
                             ForEach(helper.backups, id: \.path) { folder in
                                 VStack(alignment: .leading, spacing: 8) {
-                                    Text(folder.path).font(.caption).textSelection(.enabled)
+                                    if let created = (try? folder.resourceValues(forKeys: [.creationDateKey]))?.creationDate {
+                                        Text(created, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.subheadline.weight(.medium))
+                                    }
+                                    DisclosureGroup("File location") {
+                                        Text(folder.path).font(.caption).textSelection(.enabled)
+                                    }
                                     HStack {
                                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
                                         Button("Read this backup") { helper.readManaged(folder) }.disabled(helper.busy)
@@ -228,12 +229,20 @@ struct ContentView: View {
                                     }
                                 }
                             }
-                            Text("Only backups created by this helper appear here. Existing Finder backups are never deleted. Deletion removes the local folder; it is not a guaranteed forensic secure erase.").font(.caption).foregroundStyle(.secondary)
+                            Text("Deleting a backup keeps your saved key.").font(.caption).foregroundStyle(.secondary)
                         }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                Divider()
+                DisclosureGroup("Privacy & data", isExpanded: $showPrivacy) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Extraction reads the backup index and Oura’s ring-key database. Connection checks read the device name and backup encryption flag.")
+                        Text("Creating a phone backup can copy other app data. It stays on this Mac until you delete it. Existing Finder backups are never deleted.")
+                        Text("No telemetry or uploads. Keys are revealed, copied, or saved only when you choose. Deletion is not a guaranteed forensic secure erase.")
+                    }.font(.callout).foregroundStyle(.secondary).padding(.top, 8)
+                }
                 HStack {
-                    Text("Open-source prototype · no telemetry or uploads").font(.caption).foregroundStyle(.secondary)
+                    Text("Prototype · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development")").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("View source") { helper.viewSource() }
                 }
@@ -249,11 +258,11 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
             Button("Create backup") { helper.createBackup() }
         } message: {
-            Text("This can copy other phone data, not just Oura. It stays on this Mac at \(helper.store.root.path). The extractor reads only backup metadata and Oura’s database. You control deletion afterward; no existing backup or encryption setting is changed.")
+            Text("This can copy other phone data, not just Oura. It stays at \(helper.store.root.path) until you delete it. Your existing backups and encryption settings are unchanged.")
         }
         .alert("Delete this temporary backup?", isPresented: $helper.showDelete) {
             Button("Cancel", role: .cancel) { helper.deleting = nil }
             Button("Delete backup", role: .destructive) { helper.delete() }
-        } message: { Text("Permanently remove \(helper.deleting?.path ?? "this helper-created folder") from this Mac? This does not delete anything on the iPhone or remove a separately saved key.") }
+        } message: { Text("Remove \(helper.deleting?.path ?? "this temporary backup")? Your iPhone and saved key file are unchanged.") }
     }
 }

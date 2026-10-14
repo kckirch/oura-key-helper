@@ -20,12 +20,12 @@ public enum USBConnection: Equatable {
     }
     public var guidance: String {
         switch self {
-        case .missingTools: return "Install backup support with Homebrew: brew install libimobiledevice. You can still read an existing backup."
-        case .multiple: return "Leave only the phone that already syncs your ring in official Oura connected."
-        case .encrypted: return "Backup encryption is enabled. This prototype cannot read encrypted backups, so creating one is paused. No encryption settings have been changed. You can still choose an existing unencrypted backup."
-        case .needsTrust: return "Unlock your phone. Select it in Finder and approve Trust This Computer if prompted, then check again. Backup creation waits until the connection can be verified."
-        case .connected: return "Keep the phone unlocked and approve Trust This Computer if prompted. Use the device where official Oura already syncs your ring."
-        default: return "Connect your iPhone with a data-capable USB cable, unlock it, and approve Trust This Computer if prompted."
+        case .missingTools: return "Install USB support: brew install libimobiledevice. Existing backups still work."
+        case .multiple: return "Connect only the device that syncs your ring in official Oura."
+        case .encrypted: return "Encrypted backups aren’t supported yet. You can read an existing unencrypted backup."
+        case .needsTrust: return "Unlock your phone and approve Trust This Computer in Finder, then check again."
+        case .connected: return "Ready. Use the device that already syncs your ring in official Oura."
+        default: return "Connect your unlocked iPhone with a USB data cable."
         }
     }
     public static func check(using tool: URL?, info: URL? = nil) async -> USBConnection {
