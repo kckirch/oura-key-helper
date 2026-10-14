@@ -58,6 +58,16 @@ final class KeyReaderTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: wal), before)
     }
 
+    func testCheckpointedWalDatabaseWithoutSidecarsIsReadable() throws {
+        let root = try fixture()
+        let payload = root.appendingPathComponent("aa/" + String(repeating: "a", count: 40))
+        try sql(payload, "PRAGMA journal_mode=WAL;")
+        for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: payload.path + suffix) }
+        let before = try Data(contentsOf: payload)
+        XCTAssertEqual(try KeyReader.read(root).count, 1)
+        XCTAssertEqual(try Data(contentsOf: payload), before)
+    }
+
     func testOtherAppDomainIsNotRead() throws {
         let root = try fixture(domain: "AppDomain-com.example.other")
         XCTAssertThrowsError(try KeyReader.read(root))

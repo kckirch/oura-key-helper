@@ -2,7 +2,7 @@
 
 A small, open-source Mac companion for recovering an **existing** Oura ring key from the official iPhone app's local backup. No jailbreak, ring reset, or cloud account access is required by the extraction process.
 
-**Prototype:** fixture tests pass, but this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Encrypted backups are detected and refused; this helper does not decrypt them or change phone encryption settings. An Apple Silicon Mac build is supplied locally. It is not notarized.
+**Prototype:** nine fixture tests pass, and the reader has also recovered a known working key from a privately captured official Oura database. However, this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Encrypted backups are detected and refused; this helper does not decrypt them or change phone encryption settings. An Apple Silicon Mac build is supplied locally. It is not notarized.
 
 ## Use
 

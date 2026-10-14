@@ -15,7 +15,11 @@ private final class ReadOnlyDatabase {
     let handle: OpaquePointer
     init(_ path: URL) throws {
         var db: OpaquePointer?
-        guard sqlite3_open_v2(path.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let opened = db else {
+        // A checkpointed backup can retain WAL mode without a WAL file. Immutable
+        // reads avoid creating missing journal files; existing WALs are still honored.
+        let hasWal = FileManager.default.fileExists(atPath: path.path + "-wal")
+        let location = hasWal ? path.path : path.absoluteString + "?mode=ro&immutable=1"
+        guard sqlite3_open_v2(location, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let opened = db else {
             if let db { sqlite3_close(db) }
             throw ReaderError.message("Could not read the selected database. Check that the backup is complete and accessible.")
         }
