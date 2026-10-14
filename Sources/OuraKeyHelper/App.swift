@@ -16,11 +16,23 @@ import KeyReader
     @Published var deleting: URL?
     @Published var showDelete = false
     @Published var showBackupConsent = false
+    @Published var showPassword = false
+    @Published var password = ""
+    @Published var restorePending = false
+    @Published var restoring = false
+    let encryption: BackupEncryption
+    var canPrepareBackup: Bool {
+        if restorePending { return false }
+        if case .encrypted = connection { return true }
+        return connection.canBackUp
+    }
     private var process: Process?
     private var cancelled = false
     let store: ManagedBackups
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        encryption = BackupEncryption(journal: support.appendingPathComponent("Oura Key Helper/encryption-recovery"))
+        restorePending = encryption.pendingDevice != nil
         store = ManagedBackups(root: support.appendingPathComponent("Oura Key Helper/Temporary Backups"))
         backups = store.list()
     }
@@ -29,6 +41,7 @@ import KeyReader
         ["/opt/homebrew/bin/", "/usr/local/bin/"].map { URL(fileURLWithPath: $0 + name) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
     func refreshConnection() async {
+        guard !busy else { return }
         guard let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller"), executable("idevicebackup2") != nil else {
             connection = .missingTools; return
         }
@@ -51,29 +64,56 @@ import KeyReader
             busy = false; backups = store.list()
         }
     }
-    func createBackup() {
+    func encryptionCommand(_ arguments: [String], _ password: String?) async throws -> String {
+        let name = arguments.contains("encryption") ? "idevicebackup2" : "ideviceinfo"
+        guard let tool = executable(name) else { throw ReaderError.message("Install USB support before restoring encryption.") }
+        return try await run(tool, arguments, capture: true, password: password, timeout: 45)
+    }
+    func restoreEncryption() {
+        guard !busy else { return }
+        let secret = password; password = ""; showPassword = false
+        busy = true; backingUp = true; restoring = true
+        Task {
+            do {
+                try await encryption.restore(password: secret, command: encryptionCommand)
+                status = "Backup encryption is enabled again."
+            } catch { status = "Encryption restoration needs attention. Reconnect the original phone and try again." }
+            restorePending = encryption.pendingDevice != nil
+            busy = false; backingUp = false; restoring = false
+            await refreshConnection()
+        }
+    }
+    func createBackup(temporaryPassword: String? = nil) {
+        guard !busy else { return }
         guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller") else {
             status = "Backup creation needs libimobiledevice. Install it with Homebrew: brew install libimobiledevice ideviceinstaller. You can still read an existing backup."
             return
         }
-        guard connection.canBackUp else { status = connection.guidance; return }
+        guard canPrepareBackup else { status = connection.guidance; return }
         busy = true; backingUp = true; keys = []; saved = ""; reveal = false; cancelled = false
         status = "Checking the USB connection. Unlock your iPhone and approve Trust This Computer if prompted."
         Task {
             var temporary: URL?
+            var encryptionAttempted = false
             do {
                 let listing = try await run(deviceTool, ["-l"], capture: true)
                 let devices = listing.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
                 guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB iPhone was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the iPhone with official Oura connected, then try again.") }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let readiness = await USBConnection.check(using: deviceTool, info: infoTool, installer: installer)
-                guard readiness.canBackUp else { connection = readiness; throw ReaderError.message(readiness.guidance) }
+                if case .encrypted = readiness, let secret = temporaryPassword {
+                    guard !cancelled else { throw ReaderError.message("Cancelled before changing encryption.") }
+                    encryptionAttempted = true
+                    status = "Temporarily turning off backup encryption. Approve the prompt on your phone."
+                    try await encryption.disable(device: devices[0], password: secret, command: encryptionCommand)
+                } else if !readiness.canBackUp {
+                    connection = readiness; throw ReaderError.message(readiness.guidance)
+                }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
                 status = "Creating a temporary phone backup…"
                 _ = try await run(backupTool, ["-u", devices[0], "backup", "--full", folder.path], capture: false, folder: folder)
                 guard !cancelled else { throw ReaderError.message("Backup cancelled. The partial backup is listed below; you can delete it now.") }
-                backingUp = false
                 status = "Backup complete. Reading Oura’s ring key table…"
                 let backup = folder.appendingPathComponent(devices[0])
                 let result = try await Task.detached { try KeyReader.read(backup) }.value
@@ -82,17 +122,42 @@ import KeyReader
             } catch {
                 status = (cancelled ? "Backup cancelled." : error.localizedDescription) + (temporary != nil ? " Your temporary backup remains listed below; you can delete it now." : "")
             }
+            if encryptionAttempted {
+                restoring = true
+                let outcome = status
+                status = "Restoring backup encryption. Keep your phone connected and approve its prompt."
+                do {
+                    try await encryption.restore(password: temporaryPassword ?? "", command: encryptionCommand)
+                    status = outcome + " Backup encryption is enabled again."
+                } catch {
+                    status = outcome + " Encryption restoration needs attention. Reconnect the original phone and choose Restore encryption."
+                }
+                restorePending = encryption.pendingDevice != nil
+                restoring = false
+            }
             busy = false; backingUp = false; process = nil; backups = store.list()
+            await refreshConnection()
         }
     }
-    private func run(_ executable: URL, _ arguments: [String], capture: Bool, folder: URL? = nil) async throws -> String {
+    private func run(_ executable: URL, _ arguments: [String], capture: Bool, folder: URL? = nil, password: String? = nil, timeout: Double? = nil) async throws -> String {
         let process = Process(); process.executableURL = executable; process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        if let password {
+            // Supported upstream interface: no password in argv, logs, or persistent storage.
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "BACKUP_PASSWORD_NEW")
+            environment["BACKUP_PASSWORD"] = password
+            process.environment = environment
+        }
         // Backup output may contain unrelated filenames. Discard it instead of logging or showing it.
         let pipe = capture ? Pipe() : nil
         process.standardOutput = pipe?.fileHandleForWriting ?? FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         self.process = process
         try process.run()
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if process.isRunning { process.terminate() } }
+        }
         pipe?.fileHandleForWriting.closeFile()
         let marker = folder?.appendingPathComponent(".backup-active-pid")
         if let marker { try? Data(String(process.processIdentifier).utf8).write(to: marker) }
@@ -100,13 +165,13 @@ import KeyReader
         let output = try await Task.detached { () -> String in
             let data = pipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
             process.waitUntilExit()
-            guard process.terminationStatus == 0 else { throw ReaderError.message("The device backup did not complete. Check the cable, free disk space, and the iPhone’s trust/passcode prompt, then retry. No encryption settings were changed.") }
+            guard process.terminationStatus == 0 else { throw ReaderError.message("The device backup did not complete. Check the cable, free disk space, and the iPhone’s trust/passcode prompt, then retry. Check the helper’s encryption recovery status.") }
             return String(data: data, encoding: .utf8) ?? ""
         }.value
         self.process = nil
         return output
     }
-    func cancel() { cancelled = true; if process?.isRunning == true { process?.interrupt() }; status = "Stopping the backup. Its partial files will remain available to delete when the process stops." }
+    func cancel() { guard !restoring else { return }; cancelled = true; if process?.isRunning == true { process?.interrupt() }; status = "Stopping the backup. Its partial files will remain available to delete when the process stops." }
     func save() {
         guard let key = chosen else { return }
         let panel = NSSavePanel(); panel.message = "This file contains the ring’s existing authentication key. Keep it private."
@@ -140,8 +205,8 @@ import KeyReader
     static weak var helper: Helper?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if Self.helper?.backingUp == true {
-            let alert = NSAlert(); alert.messageText = "Stop the backup before quitting"
-            alert.informativeText = "Return to the helper and choose Cancel. When the backup stops, you can delete its temporary files or keep them for later."
+            let alert = NSAlert(); alert.messageText = "Finish the operation before quitting"
+            alert.informativeText = "Keep your phone connected while encryption is being restored. During backup creation, you can choose Cancel and wait for restoration to finish."
             alert.addButton(withTitle: "Return to helper"); alert.runModal(); return .terminateCancel
         }
         return .terminateNow
@@ -178,7 +243,7 @@ struct ContentView: View {
                             .font(.headline)
                         Spacer()
                         Button("Check again") { Task { await helper.refreshConnection() } }
-                            .disabled(helper.connection == .checking)
+                            .disabled(helper.connection == .checking || helper.busy)
                     }
                     Text(helper.connection.guidance).font(.callout).foregroundStyle(.secondary)
                 }
@@ -186,15 +251,25 @@ struct ContentView: View {
                     Toggle("I own this ring or have the owner’s permission.", isOn: $helper.consent)
                     HStack(spacing: 12) {
                         Button("Read existing backup…") { helper.existing() }
-                        Button("Create temporary backup…") { helper.showBackupConsent = true }.buttonStyle(.borderedProminent).disabled(!helper.connection.canBackUp)
+                        Button("Create temporary backup…") {
+                            if case .encrypted = helper.connection { helper.showPassword = true }
+                            else { helper.showBackupConsent = true }
+                        }.buttonStyle(.borderedProminent).disabled(!helper.canPrepareBackup)
                     }.disabled(!helper.consent || helper.busy)
                 }
                 if helper.busy || !helper.status.isEmpty {
                     HStack(alignment: .top, spacing: 12) {
                         if helper.busy { ProgressView().controlSize(.small) }
                         Text(helper.status).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        if helper.backingUp { Button("Cancel") { helper.cancel() } }
+                        if helper.backingUp && !helper.restoring { Button("Cancel") { helper.cancel() } }
                     }.padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                }
+                if helper.restorePending {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Restore backup encryption", systemImage: "lock.trianglebadge.exclamationmark").font(.headline)
+                        Text("Reconnect the original phone. Its encryption setting hasn’t been verified yet.").font(.callout).foregroundStyle(.secondary)
+                        Button("Restore encryption…") { helper.showPassword = true }.disabled(helper.busy)
+                    }
                 }
                 if !helper.keys.isEmpty {
                     GroupBox("Recovered ring key") {
@@ -253,6 +328,29 @@ struct ContentView: View {
                 await helper.refreshConnection()
                 do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { break }
             }
+        }
+        .sheet(isPresented: $helper.showPassword, onDismiss: { helper.password = "" }) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(helper.restorePending ? "Restore backup encryption" : "Use a temporary unencrypted backup").font(.title2.weight(.semibold))
+                Text(helper.restorePending
+                     ? "Reconnect the original phone and enter its original backup password."
+                     : "The helper will turn off computer backup encryption, create a local phone backup, then turn encryption back on with the same password.")
+                SecureField("Current backup password", text: $helper.password)
+                if !helper.restorePending {
+                    Text("The backup may include other phone data and stays until you delete it. Keep the phone connected; if restoration is interrupted, return here to finish it.").font(.callout).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel", role: .cancel) { helper.showPassword = false; helper.password = "" }
+                    Button(helper.restorePending ? "Restore encryption" : "Turn off & create backup") {
+                        if helper.restorePending { helper.restoreEncryption() }
+                        else {
+                            let secret = helper.password; helper.password = ""; helper.showPassword = false
+                            helper.createBackup(temporaryPassword: secret)
+                        }
+                    }.buttonStyle(.borderedProminent).disabled(helper.password.isEmpty)
+                }
+            }.padding(24).frame(width: 470)
         }
         .alert("Create a temporary phone backup?", isPresented: $helper.showBackupConsent) {
             Button("Cancel", role: .cancel) {}

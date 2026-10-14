@@ -30,7 +30,7 @@ public enum USBConnection: Equatable {
         switch self {
         case .missingTools: return "Install USB support: brew install libimobiledevice ideviceinstaller. Existing backups still work."
         case .multiple: return "Connect only the device that syncs your ring in official Oura."
-        case .encrypted: return "Encrypted backups aren’t supported yet. You can read an existing unencrypted backup."
+        case .encrypted: return "Create a temporary backup using your current backup password. Encryption will be restored afterward."
         case .needsTrust: return "Unlock your phone and approve Trust This Computer in Finder, then check again."
         case .missingOura: return "Install official Oura and sync your ring, then check again."
         case .ouraCheckUnavailable: return "Couldn’t verify official Oura. Unlock your phone and check again."
