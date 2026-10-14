@@ -29,10 +29,10 @@ import KeyReader
         ["/opt/homebrew/bin/", "/usr/local/bin/"].map { URL(fileURLWithPath: $0 + name) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
     func refreshConnection() async {
-        guard let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), executable("idevicebackup2") != nil else {
+        guard let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller"), executable("idevicebackup2") != nil else {
             connection = .missingTools; return
         }
-        connection = await USBConnection.check(using: deviceTool, info: infoTool)
+        connection = await USBConnection.check(using: deviceTool, info: infoTool, installer: installer)
     }
     func existing() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -52,8 +52,8 @@ import KeyReader
         }
     }
     func createBackup() {
-        guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo") else {
-            status = "Backup creation needs libimobiledevice. Install it with Homebrew: brew install libimobiledevice. You can still read an existing backup."
+        guard let backupTool = executable("idevicebackup2"), let deviceTool = executable("idevice_id"), let infoTool = executable("ideviceinfo"), let installer = executable("ideviceinstaller") else {
+            status = "Backup creation needs libimobiledevice. Install it with Homebrew: brew install libimobiledevice ideviceinstaller. You can still read an existing backup."
             return
         }
         guard connection.canBackUp else { status = connection.guidance; return }
@@ -66,7 +66,7 @@ import KeyReader
                 let devices = listing.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
                 guard devices.count == 1 else { throw ReaderError.message(devices.isEmpty ? "No USB iPhone was detected. Connect it, unlock it, approve Trust This Computer, and try again." : "More than one USB device is connected. Leave only the iPhone with official Oura connected, then try again.") }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
-                let readiness = await USBConnection.check(using: deviceTool, info: infoTool)
+                let readiness = await USBConnection.check(using: deviceTool, info: infoTool, installer: installer)
                 guard readiness.canBackUp else { connection = readiness; throw ReaderError.message(readiness.guidance) }
                 guard !cancelled else { throw ReaderError.message("Cancelled. No backup was started.") }
                 let folder = try store.create(); temporary = folder; backups = store.list()
@@ -174,7 +174,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         if helper.connection == .checking { ProgressView().controlSize(.small) }
-                        Label(helper.connection.title, systemImage: helper.connection.canBackUp ? "iphone" : "cable.connector")
+                        Label(helper.connection.title, systemImage: helper.connection.deviceDetected ? "iphone" : "cable.connector")
                             .font(.headline)
                         Spacer()
                         Button("Check again") { Task { await helper.refreshConnection() } }
@@ -236,7 +236,7 @@ struct ContentView: View {
                 Divider()
                 DisclosureGroup("Privacy & data", isExpanded: $showPrivacy) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Extraction reads the backup index and Oura’s ring-key database. Connection checks read the device name and backup encryption flag.")
+                        Text("Extraction reads the backup index and Oura’s ring-key database. Connection checks read the device name, backup encryption flag, and official Oura’s install status.")
                         Text("Creating a phone backup can copy other app data. It stays on this Mac until you delete it. Existing Finder backups are never deleted.")
                         Text("No telemetry or uploads. Keys are revealed, copied, or saved only when you choose. Deletion is not a guaranteed forensic secure erase.")
                     }.font(.callout).foregroundStyle(.secondary).padding(.top, 8)

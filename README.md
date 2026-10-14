@@ -2,16 +2,16 @@
 
 A small, open-source Mac companion for recovering an **existing** Oura ring key from the official iPhone app's local backup. No jailbreak, ring reset, or cloud account access is required by the extraction process.
 
-**Prototype:** twelve fixture tests pass, and the reader has also recovered a known working key from a privately captured official Oura database. However, this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Encrypted backups are detected and refused; this helper does not decrypt them or change phone encryption settings. An Apple Silicon Mac build is supplied locally. It is not notarized.
+**Prototype:** sixteen fixture tests pass, and the reader has also recovered a known working key from a privately captured official Oura database. However, this version has not yet been verified against a fresh backup from the current official Oura app. Oura can change its schema or exclude files from backups. Encrypted backups are detected and refused; this helper does not decrypt them or change phone encryption settings. An Apple Silicon Mac build is supplied locally. It is not notarized.
 
 ## Use
 
 1. Open Oura Key Helper and confirm that you own the ring/account or have the owner's permission.
-2. The live connection status shows **No phone detected**, the connected device name, or a multiple-device/setup message. It refreshes every three seconds and has a **Check again** button. Backup creation stays disabled until one USB device is detected. Choose **Read existing backup** and select the folder containing `Manifest.db`, or connect your unlocked iPhone and choose **Create temporary backup**. Approve **Trust This Computer** on the iPhone when needed.
+2. The live connection status shows **No phone detected**, the connected device name, or a multiple-device/setup message. It refreshes every three seconds and has a **Check again** button. The official Oura installation is checked too. Backup creation stays disabled until one USB device is detected, official Oura is installed, and its backup is supported. Choose **Read existing backup** and select the folder containing `Manifest.db`, or connect your unlocked iPhone and choose **Create temporary backup**. Approve **Trust This Computer** on the iPhone when needed.
 3. For backup creation, review the separate consent dialog. The backup may copy **other phone data**, not only Oura. Backup creation requires `libimobiledevice` installed with Homebrew:
 
    ```sh
-   brew install libimobiledevice
+   brew install libimobiledevice ideviceinstaller
    ```
 
 4. When a key is found, select the ring, then explicitly save or copy its key. Paste the 32-character value into Open Oura's existing ring-key field. A saved `.key` file is plain hexadecimal text with owner-only file permissions.
@@ -25,7 +25,7 @@ An initial full backup may take time and significant disk space. The application
 - Oura files: only `assa.sqlite` and its matching SQLite WAL/SHM files. They are copied into an owner-only temporary directory so SQLite can read them without altering the original backup. The directory is removed when extraction returns.
 - Oura database query: `SELECT id, auth_key FROM ringconfiguration WHERE auth_key IS NOT NULL`. Other health tables and other apps' payloads are not queried.
 - Keys: a 16-byte binary key, a Base64-encoded 16-byte key, or 32 hexadecimal characters are accepted. Missing or malformed keys produce an error; none are generated or guessed.
-- Connection status: `idevice_id` reads the USB device list and, when one device is present, its name. `ideviceinfo` also checks the backup encryption flag; encrypted or unverified connections cannot start a backup. No app data is accessed by this check. Detection alone does not establish that the device is unlocked, trusted, or has synced Oura.
+- Connection status: `idevice_id` reads the USB device list and, when one device is present, its name. `ideviceinfo` also checks the backup encryption flag; encrypted or unverified connections cannot start a backup. No app data is accessed by this check. `ideviceinstaller` queries only `com.ouraring.oura`, requesting only `CFBundleIdentifier`, to check whether official Oura is installed. Other apps are not enumerated, and app contents are not read by this check. Installation alone does not prove that Oura has synced the ring.
 - New backup: the user-installed `idevice_id -l` detects USB devices, and `idevicebackup2 -u DEVICE backup --full FOLDER` creates the backup. These tools communicate with Apple's device services. They do not restore the phone or disable encryption. Only one connected USB device is accepted.
 - Temporary backups: stored beneath `~/Library/Application Support/Oura Key Helper/Temporary Backups/`. Ownership markers identify folders created by this helper. The folder list survives reopening the app. Incomplete and cancelled backups are retained until the user chooses deletion.
 - Output: files are written only for the requested temporary backup, transient Oura database copy, ownership/process markers, and explicitly chosen key export. Keys are never logged or copied to the clipboard automatically.
@@ -52,7 +52,7 @@ bash build.sh
 open 'dist/Oura Key Helper.app'
 ```
 
-The backup-creation dependency is separate, user-installed software. No Homebrew installation or dependency download is initiated by the helper itself. `libimobiledevice` is not bundled in this project; its source and license are available upstream.
+The backup-creation dependency is separate, user-installed software. No Homebrew installation or dependency download is initiated by the helper itself. `libimobiledevice` and `ideviceinstaller` are not bundled in this project; its source and license are available upstream.
 
 ## Evidence and limits
 
